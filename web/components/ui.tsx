@@ -32,16 +32,17 @@ export function Button({
 
 // ── Badge ──
 const STATUS_COLORS: Record<string, string> = {
+  // Goal statuses
   backlog: "bg-zinc-100 text-zinc-600",
-  queued: "bg-blue-50 text-blue-700 ring-1 ring-blue-200",
-  running: "bg-green-50 text-green-700 ring-1 ring-green-200",
-  waiting_children: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
-  completed: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
+  active: "bg-blue-50 text-blue-700 ring-1 ring-blue-200",
+  blocked: "bg-amber-50 text-amber-700 ring-1 ring-amber-200",
+  done: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
   failed: "bg-red-50 text-red-700 ring-1 ring-red-200",
   cancelled: "bg-zinc-100 text-zinc-400",
-  offline: "bg-zinc-100 text-zinc-500",
-  online: "bg-green-50 text-green-700 ring-1 ring-green-200",
-  crashed: "bg-red-50 text-red-700 ring-1 ring-red-200",
+  // Run statuses
+  queued: "bg-zinc-100 text-zinc-600",
+  running: "bg-green-50 text-green-700 ring-1 ring-green-200",
+  completed: "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200",
 };
 
 export function Badge({ status, className }: { status: string; className?: string }) {
@@ -127,6 +128,38 @@ export function Dialog({
   );
 }
 
+// ── Confirm Dialog ──
+export function ConfirmDialog({
+  title,
+  message,
+  onConfirm,
+  onClose,
+  loading,
+}: {
+  title: string;
+  message: string;
+  onConfirm: () => void;
+  onClose: () => void;
+  loading?: boolean;
+}) {
+  return (
+    <Dialog
+      title={title}
+      onClose={onClose}
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>取消</Button>
+          <Button variant="danger" onClick={onConfirm} disabled={loading}>
+            {loading ? "…" : "确认删除"}
+          </Button>
+        </>
+      }
+    >
+      <p className="text-sm text-zinc-600">{message}</p>
+    </Dialog>
+  );
+}
+
 // ── Page header ──
 export function PageHeader({
   title,
@@ -149,5 +182,17 @@ export function Empty({ children }: { children: React.ReactNode }) {
     <div className="flex flex-col items-center justify-center py-16 text-center">
       <p className="text-sm text-zinc-400">{children}</p>
     </div>
+  );
+}
+
+// ── Skeleton ──
+export function Skeleton({ className }: { className?: string }) {
+  return (
+    <div
+      className={cn(
+        "animate-pulse rounded-md bg-zinc-100",
+        className
+      )}
+    />
   );
 }

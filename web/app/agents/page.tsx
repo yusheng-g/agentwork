@@ -1,13 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { useAgents, useRuntimes, useDeleteAgent, useTaskEvents } from "@/lib/queries";
+import { useAgents, useRuntimes, useDeleteAgent, useGoalEvents } from "@/lib/queries";
 import { AgentForm } from "@/components/agent-form";
-import { Button, Badge, PageHeader, Empty } from "@/components/ui";
+import { Button, PageHeader, Empty } from "@/components/ui";
 import type { Agent } from "@/lib/types";
 
 export default function AgentsPage() {
-  useTaskEvents();
+  useGoalEvents();
   const { data: agents, isLoading } = useAgents();
   const { data: runtimes } = useRuntimes();
   const del = useDeleteAgent();
@@ -35,7 +35,6 @@ export default function AgentsPage() {
                 <th className="px-4 py-3">Runtime</th>
                 <th className="px-4 py-3">Model</th>
                 <th className="px-4 py-3">并发</th>
-                <th className="px-4 py-3">状态</th>
                 <th className="px-4 py-3">创建时间</th>
                 <th className="px-4 py-3 w-20"></th>
               </tr>
@@ -47,7 +46,6 @@ export default function AgentsPage() {
                   <td className="px-4 py-3 text-zinc-600">{runtimeName(a.runtime_id)}</td>
                   <td className="px-4 py-3 text-zinc-600">{a.model || "-"}</td>
                   <td className="px-4 py-3 text-zinc-600">{a.max_concurrent}</td>
-                  <td className="px-4 py-3"><Badge status={a.status} /></td>
                   <td className="px-4 py-3 text-zinc-400">{new Date(a.created_at).toLocaleString()}</td>
                   <td className="px-4 py-3 text-right">
                     <button

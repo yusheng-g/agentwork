@@ -17,16 +17,18 @@ export function AgentForm({ onClose }: { onClose: () => void }) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    let parsedEnv: Record<string, string> = {};
+    try { parsedEnv = JSON.parse(env || "{}"); } catch { /* keep default */ }
     create.mutate(
       {
         name,
+        description: "",
         runtime_id: runtimeId,
         system_prompt: systemPrompt,
         model,
         workdir_base: workdirBase,
-        env: JSON.parse(env || "{}"),
+        env: parsedEnv,
         max_concurrent: parseInt(maxConcurrent) || 1,
-        description: "",
       },
       { onSuccess: onClose }
     );

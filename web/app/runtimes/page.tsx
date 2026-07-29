@@ -1,13 +1,13 @@
 "use client";
 
 import { useState } from "react";
-import { useRuntimes, useDeleteRuntime, useTaskEvents } from "@/lib/queries";
+import { useRuntimes, useDeleteRuntime, useGoalEvents } from "@/lib/queries";
 import { RuntimeForm } from "@/components/runtime-form";
 import { Button, PageHeader, Empty } from "@/components/ui";
 import type { Runtime } from "@/lib/types";
 
 export default function RuntimesPage() {
-  useTaskEvents();
+  useGoalEvents();
   const { data: runtimes, isLoading } = useRuntimes();
   const del = useDeleteRuntime();
   const [showForm, setShowForm] = useState(false);
@@ -30,6 +30,7 @@ export default function RuntimesPage() {
               <tr className="border-b border-zinc-100 bg-zinc-50/50 text-left text-xs font-medium text-zinc-500 uppercase tracking-wide">
                 <th className="px-4 py-3">名称</th>
                 <th className="px-4 py-3">Transport</th>
+                <th className="px-4 py-3">Provider</th>
                 <th className="px-4 py-3">可执行 / Endpoint</th>
                 <th className="px-4 py-3">创建时间</th>
                 <th className="px-4 py-3 w-20"></th>
@@ -41,6 +42,9 @@ export default function RuntimesPage() {
                   <td className="px-4 py-3 font-medium text-zinc-900">{rt.name}</td>
                   <td className="px-4 py-3">
                     <span className="px-2 py-0.5 text-xs rounded bg-zinc-100 text-zinc-600">{rt.transport}</span>
+                  </td>
+                  <td className="px-4 py-3">
+                    <span className="px-2 py-0.5 text-xs rounded bg-blue-50 text-blue-700">{rt.provider}</span>
                   </td>
                   <td className="px-4 py-3 text-zinc-600 font-mono text-xs">
                     {rt.transport === "stdio" ? rt.executable : rt.endpoint}

@@ -8,6 +8,7 @@ export function RuntimeForm({ onClose }: { onClose: () => void }) {
   const create = useCreateRuntime();
   const [name, setName] = useState("");
   const [transport, setTransport] = useState("stdio");
+  const [provider, setProvider] = useState("acp");
   const [executable, setExecutable] = useState("");
   const [endpoint, setEndpoint] = useState("");
   const [args, setArgs] = useState("[]");
@@ -15,15 +16,19 @@ export function RuntimeForm({ onClose }: { onClose: () => void }) {
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
+    let parsedArgs: string[] = [];
+    let parsedEnv: Record<string, string> = {};
+    try { parsedArgs = JSON.parse(args || "[]"); } catch { /* keep default */ }
+    try { parsedEnv = JSON.parse(env || "{}"); } catch { /* keep default */ }
     create.mutate(
       {
         name,
         transport,
+        provider,
         executable,
         endpoint,
-        args: JSON.parse(args || "[]"),
-        env: JSON.parse(env || "{}"),
-        protocol: "acp",
+        args: parsedArgs,
+        env: parsedEnv,
       },
       { onSuccess: onClose }
     );
@@ -52,6 +57,14 @@ export function RuntimeForm({ onClose }: { onClose: () => void }) {
             <option value="stdio">stdio</option>
             <option value="ws">ws</option>
             <option value="tcp">tcp</option>
+          </select>
+        </Field>
+
+        <Field label="Provider" hint="协议类型（agent 使用的通信协议）">
+          <select value={provider} onChange={(e) => setProvider(e.target.value)} className={inputCls}>
+            <option value="acp">acp</option>
+            <option value="jsonl">jsonl</option>
+            <option value="jsonrpc">jsonrpc</option>
           </select>
         </Field>
 

@@ -8,14 +8,24 @@ import {
   listAgents,
   createAgent,
   deleteAgent,
-  listTasks,
-  getTask,
-  createTask,
-  deleteTask,
-  assignTask,
-  cancelTask,
-  waitChildren,
-  getTaskMessages,
+  listGoals,
+  getGoal,
+  createGoal,
+  deleteGoal,
+  assignGoal,
+  cancelGoal,
+  waitGoalChildren,
+  listGoalRuns,
+  listGoalComments,
+  createGoalComment,
+  listSquads,
+  createSquad,
+  deleteSquad,
+  addSquadMember,
+  listSquadMembers,
+  listSchedules,
+  createSchedule,
+  deleteSchedule,
 } from "./api";
 import { useWSEvent } from "./ws";
 
@@ -23,9 +33,14 @@ import { useWSEvent } from "./ws";
 export const qk = {
   runtimes: ["runtimes"] as const,
   agents: ["agents"] as const,
-  tasks: ["tasks"] as const,
-  task: (id: string) => ["task", id] as const,
-  messages: (id: string) => ["messages", id] as const,
+  goals: ["goals"] as const,
+  goal: (id: string) => ["goals", id] as const,
+  goalRuns: (goalId: string) => ["goals", goalId, "runs"] as const,
+  goalComments: (goalId: string) => ["goals", goalId, "comments"] as const,
+  squads: ["squads"] as const,
+  squad: (id: string) => ["squads", id] as const,
+  squadMembers: (squadId: string) => ["squads", squadId, "members"] as const,
+  schedules: ["schedules"] as const,
 };
 
 // ── Runtime hooks ──
@@ -66,65 +81,149 @@ export function useDeleteAgent() {
   });
 }
 
-// ── Task hooks ──
-export function useTasks() {
-  return useQuery({ queryKey: qk.tasks, queryFn: listTasks });
+// ── Goal hooks ──
+export function useGoals() {
+  return useQuery({ queryKey: qk.goals, queryFn: listGoals });
 }
-export function useTask(id: string) {
-  return useQuery({ queryKey: qk.task(id), queryFn: () => getTask(id) });
+export function useGoal(id: string) {
+  return useQuery({ queryKey: qk.goal(id), queryFn: () => getGoal(id) });
 }
-export function useTaskMessages(id: string) {
-  return useQuery({ queryKey: qk.messages(id), queryFn: () => getTaskMessages(id) });
-}
-export function useCreateTask() {
+export function useCreateGoal() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: createTask,
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.tasks }),
+    mutationFn: createGoal,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.goals }),
   });
 }
-export function useDeleteTask() {
+export function useDeleteGoal() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: deleteTask,
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.tasks }),
+    mutationFn: deleteGoal,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.goals }),
   });
 }
-export function useAssignTask() {
+export function useAssignGoal() {
   const qc = useQueryClient();
   return useMutation({
     mutationFn: ({ id, ...body }: { id: string; assignee_type: string; assignee_id: string; handoff_note?: string }) =>
-      assignTask(id, body),
+      assignGoal(id, body),
     onSuccess: () => {
-      qc.invalidateQueries({ queryKey: qk.tasks });
+      qc.invalidateQueries({ queryKey: qk.goals });
     },
   });
 }
-export function useCancelTask() {
+export function useCancelGoal() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: cancelTask,
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.tasks }),
+    mutationFn: cancelGoal,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.goals }),
   });
 }
-export function useWaitChildren() {
+export function useWaitGoalChildren() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: waitChildren,
-    onSuccess: () => qc.invalidateQueries({ queryKey: qk.tasks }),
+    mutationFn: waitGoalChildren,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.goals }),
   });
 }
 
-// ── WS event → invalidate ──
-export function useTaskEvents() {
+// ── Run hooks ──
+export function useGoalRuns(goalId: string) {
+  return useQuery({
+    queryKey: qk.goalRuns(goalId),
+    queryFn: () => listGoalRuns(goalId),
+  });
+}
+
+// ── Comment hooks ──
+export function useGoalComments(goalId: string) {
+  return useQuery({
+    queryKey: qk.goalComments(goalId),
+    queryFn: () => listGoalComments(goalId),
+  });
+}
+export function useCreateGoalComment() {
   const qc = useQueryClient();
-  useWSEvent("task:created", () => qc.invalidateQueries({ queryKey: qk.tasks }));
-  useWSEvent("task:finished", () => qc.invalidateQueries({ queryKey: qk.tasks }));
-  useWSEvent("task:deleted", () => qc.invalidateQueries({ queryKey: qk.tasks }));
-  useWSEvent("task:assigned", () => qc.invalidateQueries({ queryKey: qk.tasks }));
-  useWSEvent("task:retrying", () => qc.invalidateQueries({ queryKey: qk.tasks }));
-  useWSEvent("task:waiting", () => qc.invalidateQueries({ queryKey: qk.tasks }));
-  useWSEvent("task:wakeup", () => qc.invalidateQueries({ queryKey: qk.tasks }));
+  return useMutation({
+    mutationFn: ({ goalId, ...body }: { goalId: string; author_type: string; author_id: string; content: string; parent_id?: string }) =>
+      createGoalComment(goalId, body),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: qk.goalComments(vars.goalId) });
+    },
+  });
+}
+
+// ── Squad hooks ──
+export function useSquads() {
+  return useQuery({ queryKey: qk.squads, queryFn: listSquads });
+}
+export function useCreateSquad() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createSquad,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.squads }),
+  });
+}
+export function useDeleteSquad() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteSquad,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.squads }),
+  });
+}
+export function useSquadMembers(squadId: string) {
+  return useQuery({
+    queryKey: qk.squadMembers(squadId),
+    queryFn: () => listSquadMembers(squadId),
+  });
+}
+export function useAddSquadMember() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: ({ squadId, ...body }: { squadId: string; member_type: string; member_id: string; role?: string }) =>
+      addSquadMember(squadId, body),
+    onSuccess: (_data, vars) => {
+      qc.invalidateQueries({ queryKey: qk.squadMembers(vars.squadId) });
+    },
+  });
+}
+
+// ── Schedule hooks ──
+export function useSchedules() {
+  return useQuery({ queryKey: qk.schedules, queryFn: listSchedules });
+}
+export function useCreateSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: createSchedule,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.schedules }),
+  });
+}
+export function useDeleteSchedule() {
+  const qc = useQueryClient();
+  return useMutation({
+    mutationFn: deleteSchedule,
+    onSuccess: () => qc.invalidateQueries({ queryKey: qk.schedules }),
+  });
+}
+
+// ── WebSocket event → cache invalidation ──
+export function useGoalEvents() {
+  const qc = useQueryClient();
+  // Goal lifecycle events
+  useWSEvent("goal:created", () => qc.invalidateQueries({ queryKey: qk.goals }));
+  useWSEvent("goal:assigned", () => qc.invalidateQueries({ queryKey: qk.goals }));
+  useWSEvent("goal:finished", () => qc.invalidateQueries({ queryKey: qk.goals }));
+  useWSEvent("goal:retrying", () => qc.invalidateQueries({ queryKey: qk.goals }));
+  useWSEvent("goal:retry_failed", () => qc.invalidateQueries({ queryKey: qk.goals }));
+  useWSEvent("goal:waiting", () => qc.invalidateQueries({ queryKey: qk.goals }));
+  useWSEvent("goal:deleted", () => qc.invalidateQueries({ queryKey: qk.goals }));
+  // Agent lifecycle events
   useWSEvent("agent:created", () => qc.invalidateQueries({ queryKey: qk.agents }));
   useWSEvent("agent:deleted", () => qc.invalidateQueries({ queryKey: qk.agents }));
+  // Squad events
+  useWSEvent("squad:created", () => qc.invalidateQueries({ queryKey: qk.squads }));
+  useWSEvent("squad:deleted", () => qc.invalidateQueries({ queryKey: qk.squads }));
+  // Schedule events
+  useWSEvent("schedule:created", () => qc.invalidateQueries({ queryKey: qk.schedules }));
 }
