@@ -10,7 +10,9 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
+	"os"
 	"os/signal"
 	"syscall"
 
@@ -26,10 +28,18 @@ import (
 	"github.com/eushing/agentwork/internal/store"
 )
 
+var version = "dev"
+
 func main() {
+	versionFlag := flag.Bool("version", false, "print version and exit")
 	addr := flag.String("addr", ":7373", "HTTP listen address")
 	dbPath := flag.String("db", "", "SQLite path (default ~/.agentwork/agentwork.db)")
 	flag.Parse()
+
+	if *versionFlag {
+		fmt.Println(version)
+		os.Exit(0)
+	}
 
 	st, err := store.Open(*dbPath)
 	if err != nil {
