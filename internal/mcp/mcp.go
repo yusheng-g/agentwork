@@ -27,7 +27,6 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"os"
 	"os/exec"
 	"runtime"
 	"strings"
@@ -118,38 +117,7 @@ func (e *Executor) requireOwnerOf(ctx context.Context, goalID string) error {
 func NewServer(exec *Executor) *gmcp.Server {
 	srv := gmcp.NewServer(&gmcp.Implementation{Name: "agentwork", Version: "0.1"}, nil)
 
-	type readArgs struct {
-		Path string `json:"path" jsonschema:"absolute path of the file to read"`
-	}
-	gmcp.AddTool(srv, &gmcp.Tool{
-		Name:        "read_file",
-		Description: "Read a file from the workspace (absolute path).",
-	}, func(ctx context.Context, req *gmcp.CallToolRequest, args readArgs) (*gmcp.CallToolResult, any, error) {
-		data, err := os.ReadFile(args.Path)
-		if err != nil {
-			return nil, nil, err
-		}
-		return &gmcp.CallToolResult{Content: []gmcp.Content{&gmcp.TextContent{Text: string(data)}}}, nil, nil
-	})
-
-	type writeArgs struct {
-		Path    string `json:"path" jsonschema:"absolute path of the file to write"`
-		Content string `json:"content" jsonschema:"file content"`
-	}
-	gmcp.AddTool(srv, &gmcp.Tool{
-		Name:        "write_file",
-		Description: "Write a file. path is REQUIRED — the absolute path of the file (<absolute-path>); parent directories are created. Do NOT use shell redirection for file writes.",
-	}, func(ctx context.Context, req *gmcp.CallToolRequest, args writeArgs) (*gmcp.CallToolResult, any, error) {
-		if dir := dirOf(args.Path); dir != "" {
-			if err := os.MkdirAll(dir, 0o755); err != nil {
-				return nil, nil, err
-			}
-		}
-		if err := os.WriteFile(args.Path, []byte(args.Content), 0o644); err != nil {
-			return nil, nil, err
-		}
-		return &gmcp.CallToolResult{Content: []gmcp.Content{&gmcp.TextContent{Text: "written " + args.Path}}}, nil, nil
-	})
+	addFileTools(srv, exec)
 
 	// defaultCreateWait is how long terminal_create waits (synchronously) for
 	// a short command before handing the terminal id back: most tool calls are
@@ -169,9 +137,15 @@ func NewServer(exec *Executor) *gmcp.Server {
 	}
 
 	type createArgs struct {
-		Command string  `json:"command" jsonschema:"the SHELL command line — pipes, redirects, && and quoting all work; no separate args field"`
+		Command string `json:"command" jsonschema:"the SHELL command line — pipes, redirects, && and quoting all work; no separate args field"`
 		Cwd     *string `json:"cwd,omitempty" jsonschema:"working directory override (defaults to the workspace root)"`
-		Timeout *int64  `json:"timeout,omitempty" jsonschema:"sync-wait budget in seconds (default 10): if the command finishes within it the result is returned directly; otherwise a terminal_id comes back and you poll terminal_output. 0 = return the id immediately (pure async)"`
+		// Timeout is `any` (not `*int64`) so the JSON schema has no type
+		// constraint — some models serialize numbers as strings ("15" instead
+		// of 15), which the SDK's schema validation rejects for `*int64`
+		// ("type: 15 has type string, want one of null, integer"). parseBudget
+		// coerces both forms; the description still tells the model to send an
+		// integer.
+		Timeout any `json:"timeout,omitempty" jsonschema:"sync-wait budget in seconds (default 10): if the command finishes within it the result is returned directly; otherwise a terminal_id comes back and you poll terminal_output. 0 = return the id immediately (pure async)"`
 	}
 	gmcp.AddTool(srv, &gmcp.Tool{
 		Name: "terminal_create",
@@ -196,17 +170,14 @@ func NewServer(exec *Executor) *gmcp.Server {
 		}
 		budget := defaultCreateWait
 		if args.Timeout != nil {
-			if *args.Timeout <= 0 {
-				budget = 0 // explicit 0: pure async, return the id immediately
-			} else {
-				budget = time.Duration(*args.Timeout) * time.Second
-			}
+			budget = parseBudget(args.Timeout, defaultCreateWait)
 		}
 		id, err := exec.host.Create(sh, argv, exec.Env, cwd, 0)
 		if err != nil {
 			return nil, nil, err
 		}
-		var cursor *int64
+		var zeroCursor int64
+		cursor := &zeroCursor
 		var out strings.Builder
 		var elapsed int64
 		deadline := time.Now().Add(budget)
@@ -240,7 +211,10 @@ func NewServer(exec *Executor) *gmcp.Server {
 
 	type outputArgs struct {
 		TerminalID string `json:"terminal_id" jsonschema:"the terminal id from terminal_create"`
-		Cursor     *int64 `json:"cursor,omitempty" jsonschema:"opaque cursor from the previous terminal_output call; omit on the first poll"`
+		// Cursor is `any` (not `*int64`) so the JSON schema has no type
+		// constraint — some models serialize numbers as strings. parseInt64Ptr
+		// coerces both forms; nil = first poll (no cursor).
+		Cursor any `json:"cursor,omitempty" jsonschema:"opaque cursor from the previous terminal_output call; omit on the first poll"`
 	}
 	gmcp.AddTool(srv, &gmcp.Tool{
 		Name: "terminal_output",
@@ -248,7 +222,7 @@ func NewServer(exec *Executor) *gmcp.Server {
 			"the next cursor to pass back, and the exit status once finished. Repeat until exited=true, then terminal_release. " +
 			"The cursor makes retries safe — re-polling with an old cursor never skips or duplicates bytes.",
 	}, func(ctx context.Context, req *gmcp.CallToolRequest, args outputArgs) (*gmcp.CallToolResult, any, error) {
-		resp, next, elapsed, err := exec.host.Output(acp.TerminalId(args.TerminalID), args.Cursor)
+		resp, next, elapsed, err := exec.host.Output(acp.TerminalId(args.TerminalID), parseInt64Ptr(args.Cursor))
 		if err != nil {
 			return nil, nil, err
 		}
@@ -299,7 +273,9 @@ func NewServer(exec *Executor) *gmcp.Server {
 	type getCommentsArgs struct {
 		GoalID string `json:"goal_id,omitempty" jsonschema:"the goal to read comments from — defaults to THIS goal"`
 		After  string `json:"after,omitempty" jsonschema:"a comment id cursor — only comments NEWER than it ('' = from the start)"`
-		Limit  *int   `json:"limit,omitempty" jsonschema:"max comments (default 50, hard max 100)"`
+		// Limit is `any` (not `*int`) so the JSON schema has no type
+		// constraint — some models serialize numbers as strings ("100").
+		Limit any `json:"limit,omitempty" jsonschema:"max comments (default 50, hard max 100)"`
 	}
 	gmcp.AddTool(srv, &gmcp.Tool{
 		Name:        "get_comments",
@@ -316,8 +292,8 @@ func NewServer(exec *Executor) *gmcp.Server {
 			goalID = exec.GoalID
 		}
 		limit := 50
-		if args.Limit != nil && *args.Limit > 0 {
-			limit = *args.Limit
+		if p := parseInt64Ptr(args.Limit); p != nil && *p > 0 {
+			limit = int(*p)
 		}
 		list, err := exec.commentSvc.ListAfter(ctx, goalID, args.After, limit)
 		if err != nil {
@@ -600,7 +576,9 @@ func NewServer(exec *Executor) *gmcp.Server {
 
 	type listArgs struct {
 		Status *string `json:"status,omitempty" jsonschema:"filter by status (backlog|active|review|done|failed|cancelled)"`
-		Limit  *int    `json:"limit,omitempty" jsonschema:"max results (default all)"`
+		// Limit is `any` (not `*int`) so the JSON schema has no type
+		// constraint — some models serialize numbers as strings.
+		Limit any `json:"limit,omitempty" jsonschema:"max results (default all)"`
 	}
 	gmcp.AddTool(srv, &gmcp.Tool{
 		Name:        "goal_list",
@@ -613,13 +591,17 @@ func NewServer(exec *Executor) *gmcp.Server {
 		if err != nil {
 			return nil, nil, err
 		}
+		var limit int
+		if p := parseInt64Ptr(args.Limit); p != nil {
+			limit = int(*p)
+		}
 		var out []map[string]any
 		for _, g := range goals {
 			if args.Status != nil && g.Status != *args.Status {
 				continue
 			}
 			out = append(out, map[string]any{"id": g.ID, "title": g.Title, "status": g.Status, "assignee": g.AssigneeType + "/" + g.AssigneeID})
-			if args.Limit != nil && len(out) >= *args.Limit {
+			if limit > 0 && len(out) >= limit {
 				break
 			}
 		}
@@ -721,11 +703,3 @@ func execCommand(ctx context.Context, dir, name string, args ...string) *exec.Cm
 }
 
 var _ = exec.Command // keep the import bound (execCommand covers all uses)
-
-func dirOf(path string) string {
-	i := strings.LastIndexByte(path, '/')
-	if i < 0 {
-		return ""
-	}
-	return path[:i]
-}

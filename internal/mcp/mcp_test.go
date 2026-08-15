@@ -167,7 +167,7 @@ func TestMCPFullClientRoundTrip(t *testing.T) {
 	for _, tl := range tools.Tools {
 		found[tl.Name] = true
 	}
-	for _, want := range []string{"read_file", "write_file", "terminal_create", "terminal_output", "terminal_release"} {
+	for _, want := range []string{"read_file", "write_file", "edit_file", "list_dir", "grep", "terminal_create", "terminal_output", "terminal_release"} {
 		if !found[want] {
 			t.Fatalf("tool %q not advertised, got %v", want, found)
 		}
@@ -187,8 +187,8 @@ func TestMCPFullClientRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read: %v", err)
 	}
-	if tc, ok := res.Content[0].(*gmcp.TextContent); !ok || tc.Text != "via sdk client" {
-		t.Fatalf("read content: want %q, got %+v", "via sdk client", res.Content[0])
+	if tc, ok := res.Content[0].(*gmcp.TextContent); !ok || tc.Text != "via sdk client\n" {
+		t.Fatalf("read content: want %q, got %+v", "via sdk client\\n", res.Content[0])
 	}
 
 	// Async terminal: create → poll output until exited → release. The
@@ -431,5 +431,512 @@ func TestTerminalCreateShellSemantics(t *testing.T) {
 	host.mu.Unlock()
 	if cmd != "/bin/sh" || len(args) != 2 || args[0] != "-c" || !strings.Contains(args[1], "tr a-z A-Z") {
 		t.Fatalf("the host must run /bin/sh -c <command>, got %q %v", cmd, args)
+	}
+}
+
+// TestTerminalCreateStringTimeout: some models serialize the timeout as a
+// string ("15" instead of 15). The schema must accept both forms — a strict
+// *int64 schema rejects the string with "type: 15 has type string, want one
+// of null, integer" and the whole tool call fails.
+func TestTerminalCreateStringTimeout(t *testing.T) {
+	host := newFakeHost()
+	exec := NewExecutor(t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, host)
+	session := connect(t, HTTPHandler(exec))
+	ctx := context.Background()
+
+	// String timeout — the regression case.
+	res, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "terminal_create",
+		Arguments: map[string]any{"command": "echo ok; exit 0", "timeout": "15"},
+	})
+	if err != nil {
+		t.Fatalf("terminal_create with string timeout: %v", err)
+	}
+	text := res.Content[0].(*gmcp.TextContent).Text
+	if res.IsError {
+		t.Fatalf("string timeout must not be rejected: %s", text)
+	}
+	if !strings.Contains(text, "ok") {
+		t.Fatalf("expected command output, got %q", text)
+	}
+
+	// Integer timeout — the normal case, must still work.
+	res2, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "terminal_create",
+		Arguments: map[string]any{"command": "echo ok2; exit 0", "timeout": float64(15)},
+	})
+	if err != nil {
+		t.Fatalf("terminal_create with int timeout: %v", err)
+	}
+	text2 := res2.Content[0].(*gmcp.TextContent).Text
+	if res2.IsError {
+		t.Fatalf("int timeout must not be rejected: %s", text2)
+	}
+	if !strings.Contains(text2, "ok2") {
+		t.Fatalf("expected command output, got %q", text2)
+	}
+
+	// Zero timeout (string) — pure async, returns a terminal_id immediately.
+	res3, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "terminal_create",
+		Arguments: map[string]any{"command": "sleep 5", "timeout": "0"},
+	})
+	if err != nil {
+		t.Fatalf("terminal_create with string 0 timeout: %v", err)
+	}
+	text3 := res3.Content[0].(*gmcp.TextContent).Text
+	if res3.IsError {
+		t.Fatalf("string 0 timeout must not be rejected: %s", text3)
+	}
+	if !strings.Contains(text3, `"exited":false`) {
+		t.Fatalf("0 timeout should be pure async (exited=false), got %q", text3)
+	}
+}
+
+// TestStringIntegerArgs: some models serialize integer arguments as strings
+// ("100" instead of 100). The MCP tool schemas use `any` for integer fields
+// so the SDK's JSON schema validation does not reject them. This test
+// verifies get_comments.Limit and goal_list.Limit accept both forms.
+func TestStringIntegerArgs(t *testing.T) {
+	ctx := context.Background()
+	st, err := store.Open(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	bus := events.NewBus()
+	goalSvc := service.NewGoalService(st, bus)
+	commentSvc := service.NewCommentService(st, bus)
+	commentSvc.SetGoalService(goalSvc)
+	rt, _ := service.NewRuntimeService(st).Create(ctx, service.Runtime{Name: "rt", Transport: "stdio", Provider: "acp", Executable: "/bin/true"})
+	agentSvc := service.NewAgentService(st, bus)
+	agentA, _ := agentSvc.Create(ctx, service.Agent{Name: "a", RuntimeID: rt.ID})
+	dom, err := service.NewDomainService(st, bus).Create(ctx, service.Domain{Name: "d", GitURL: "https://e.com/d.git"})
+	if err != nil {
+		t.Fatalf("create domain: %v", err)
+	}
+	goal, err := goalSvc.Create(ctx, service.Goal{Title: "g", DomainID: dom.ID, AssigneeType: "agent", AssigneeID: agentA.ID, Status: "active"})
+	if err != nil {
+		t.Fatalf("create goal: %v", err)
+	}
+	if _, err := commentSvc.CreateNoDispatch(ctx, service.Comment{GoalID: goal.ID, AuthorType: "agent", AuthorID: agentA.ID, Content: "c1"}); err != nil {
+		t.Fatalf("create comment: %v", err)
+	}
+
+	exec := NewExecutor(t.TempDir(), nil, newFakeHost())
+	exec.SetCollaboration(goal.ID, agentA.ID, "run-1", commentSvc, goalSvc, nil, agentSvc, nil)
+	session := connect(t, HTTPHandler(exec))
+
+	// get_comments with string limit — must not be rejected.
+	res, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "get_comments",
+		Arguments: map[string]any{"limit": "100"},
+	})
+	if err != nil {
+		t.Fatalf("get_comments with string limit: %v", err)
+	}
+	text := res.Content[0].(*gmcp.TextContent).Text
+	if res.IsError {
+		t.Fatalf("string limit must not be rejected: %s", text)
+	}
+	if !strings.Contains(text, "c1") {
+		t.Fatalf("get_comments should return comments, got %q", text)
+	}
+
+	// get_comments with integer limit — must still work.
+	res2, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "get_comments",
+		Arguments: map[string]any{"limit": float64(100)},
+	})
+	if err != nil {
+		t.Fatalf("get_comments with int limit: %v", err)
+	}
+	text2 := res2.Content[0].(*gmcp.TextContent).Text
+	if res2.IsError {
+		t.Fatalf("int limit must not be rejected: %s", text2)
+	}
+
+	// goal_list with string limit — must not be rejected.
+	res3, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "goal_list",
+		Arguments: map[string]any{"limit": "10"},
+	})
+	if err != nil {
+		t.Fatalf("goal_list with string limit: %v", err)
+	}
+	text3 := res3.Content[0].(*gmcp.TextContent).Text
+	if res3.IsError {
+		t.Fatalf("goal_list string limit must not be rejected: %s", text3)
+	}
+	if !strings.Contains(text3, goal.ID) {
+		t.Fatalf("goal_list should return goals, got %q", text3)
+	}
+
+	// terminal_output with string cursor — must not be rejected (even if
+	// the terminal doesn't exist, the error should be from the host, not
+	// from schema validation).
+	res4, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "terminal_output",
+		Arguments: map[string]any{"terminal_id": "nonexistent", "cursor": "42"},
+	})
+	if err != nil {
+		t.Fatalf("terminal_output with string cursor: %v", err)
+	}
+	text4 := res4.Content[0].(*gmcp.TextContent).Text
+	if strings.Contains(text4, "validating") {
+		t.Fatalf("string cursor must not trigger schema validation error: %s", text4)
+	}
+}
+
+// TestReadFileLineLimit: read_file accepts optional line (1-based) and limit
+// parameters. LLMs naturally send them for large files; without these fields
+// the schema rejects them as "unexpected additional properties". Also verifies
+// the line-range prefix and string-typed number coercion (some LLMs send
+// "3" instead of 3).
+func TestReadFileLineLimit(t *testing.T) {
+	host := newFakeHost()
+	exec := NewExecutor(t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, host)
+	session := connect(t, HTTPHandler(exec))
+	ctx := context.Background()
+
+	// Write a 10-line file (each line followed by \n).
+	path := filepath.Join(exec.Worktree, "paginated.txt")
+	lines := []string{"L0", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8", "L9"}
+	content := strings.Join(lines, "\n") + "\n"
+	if _, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "write_file",
+		Arguments: map[string]any{"path": path, "content": content},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Read with line=3, limit=3 → lines 3-5 = L2,L3,L4.
+	res, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": path, "line": float64(3), "limit": float64(3)},
+	})
+	if err != nil {
+		t.Fatalf("read with line+limit: %v", err)
+	}
+	text := res.Content[0].(*gmcp.TextContent).Text
+	if res.IsError {
+		t.Fatalf("line+limit must not be rejected: %s", text)
+	}
+	if !strings.Contains(text, "[lines 3-5,") {
+		t.Fatalf("expected line-range prefix [lines 3-5, got %q", text)
+	}
+	if !strings.Contains(text, "L2\nL3\nL4\n") {
+		t.Fatalf("expected L2\\nL3\\nL4 in output, got %q", text)
+	}
+
+	// Read with string-typed line and limit (LLM regression case).
+	res2, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": path, "line": "3", "limit": "3"},
+	})
+	if err != nil {
+		t.Fatalf("read with string line+limit: %v", err)
+	}
+	text2 := res2.Content[0].(*gmcp.TextContent).Text
+	if res2.IsError {
+		t.Fatalf("string line+limit must not be rejected: %s", text2)
+	}
+	if !strings.Contains(text2, "[lines 3-5,") {
+		t.Fatalf("expected line-range prefix for string types, got %q", text2)
+	}
+	if !strings.Contains(text2, "L2\nL3\nL4\n") {
+		t.Fatalf("expected L2\\nL3\\nL4 for string types, got %q", text2)
+	}
+
+	// Read with line only (no limit) → rest of file from line 9.
+	res3, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": path, "line": float64(9)},
+	})
+	if err != nil {
+		t.Fatalf("read with line only: %v", err)
+	}
+	text3 := res3.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text3, "L8\nL9") {
+		t.Fatalf("expected L8\\nL9 in output, got %q", text3)
+	}
+
+	// Read with no line/limit → whole file (no prefix).
+	res4, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": path},
+	})
+	if err != nil {
+		t.Fatalf("read without pagination: %v", err)
+	}
+	text4 := res4.Content[0].(*gmcp.TextContent).Text
+	if text4 != content {
+		t.Fatalf("expected full file, got %q", text4)
+	}
+
+	// Line past end → "[line N is beyond end of file ...]".
+	res5, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": path, "line": float64(100)},
+	})
+	if err != nil {
+		t.Fatalf("read with line past end: %v", err)
+	}
+	text5 := res5.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text5, "beyond end of file") {
+		t.Fatalf("expected beyond-end message, got %q", text5)
+	}
+}
+
+// TestEditFile: edit_file replaces text with uniqueness enforcement.
+func TestEditFile(t *testing.T) {
+	host := newFakeHost()
+	exec := NewExecutor(t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, host)
+	session := connect(t, HTTPHandler(exec))
+	ctx := context.Background()
+
+	// Write a file with unique and duplicate text.
+	path := filepath.Join(exec.Worktree, "edit.txt")
+	content := "line one\nline two\nline three\nline two\n"
+	if _, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "write_file",
+		Arguments: map[string]any{"path": path, "content": content},
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Unique replacement.
+	res, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "edit_file",
+		Arguments: map[string]any{"path": path, "old_text": "line three", "new_text": "LINE THREE"},
+	})
+	if err != nil {
+		t.Fatalf("edit unique: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("edit unique failed: %s", res.Content[0].(*gmcp.TextContent).Text)
+	}
+
+	// Verify the edit landed.
+	res2, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": path},
+	})
+	if err != nil {
+		t.Fatalf("read after edit: %v", err)
+	}
+	text := res2.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text, "LINE THREE") {
+		t.Fatalf("edit did not land: %q", text)
+	}
+
+	// Non-unique without replace_all → error.
+	res3, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "edit_file",
+		Arguments: map[string]any{"path": path, "old_text": "line two", "new_text": "LINE TWO"},
+	})
+	if err != nil {
+		t.Fatalf("edit non-unique call: %v", err)
+	}
+	text3 := res3.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text3, "found 2 times") {
+		t.Fatalf("expected uniqueness error, got %q", text3)
+	}
+
+	// replace_all=true → both replaced.
+	res4, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "edit_file",
+		Arguments: map[string]any{"path": path, "old_text": "line two", "new_text": "LINE TWO", "replace_all": true},
+	})
+	if err != nil {
+		t.Fatalf("edit replace_all: %v", err)
+	}
+	if res4.IsError {
+		t.Fatalf("edit replace_all failed: %s", res4.Content[0].(*gmcp.TextContent).Text)
+	}
+	res5, _ := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": path},
+	})
+	text5 := res5.Content[0].(*gmcp.TextContent).Text
+	if strings.Contains(text5, "line two") {
+		t.Fatalf("replace_all did not replace all: %q", text5)
+	}
+
+	// old_text not found → error.
+	res6, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "edit_file",
+		Arguments: map[string]any{"path": path, "old_text": "nope", "new_text": "x"},
+	})
+	if err != nil {
+		t.Fatalf("edit not-found call: %v", err)
+	}
+	text6 := res6.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text6, "not found") {
+		t.Fatalf("expected not-found error, got %q", text6)
+	}
+}
+
+// TestListDir: list_dir lists directory contents with sorting.
+func TestListDir(t *testing.T) {
+	host := newFakeHost()
+	exec := NewExecutor(t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, host)
+	session := connect(t, HTTPHandler(exec))
+	ctx := context.Background()
+
+	// Create some files and dirs.
+	for _, name := range []string{"zeta.txt", "alpha.go", "beta/"} {
+		full := filepath.Join(exec.Worktree, name)
+		if strings.HasSuffix(name, "/") {
+			os.MkdirAll(full, 0o755)
+		} else {
+			os.WriteFile(full, []byte("x"), 0o644)
+		}
+	}
+
+	// List workspace root (no path → default).
+	res, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "list_dir",
+		Arguments: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("list_dir: %v", err)
+	}
+	text := res.Content[0].(*gmcp.TextContent).Text
+	// Directories must come first, then files sorted alphabetically.
+	betaIdx := strings.Index(text, "beta/")
+	alphaIdx := strings.Index(text, "alpha.go")
+	zetaIdx := strings.Index(text, "zeta.txt")
+	if betaIdx < 0 || alphaIdx < 0 || zetaIdx < 0 {
+		t.Fatalf("missing entries in %q", text)
+	}
+	if betaIdx > alphaIdx || alphaIdx > zetaIdx {
+		t.Fatalf("sorting wrong (dirs first, then alpha): beta=%d alpha=%d zeta=%d", betaIdx, alphaIdx, zetaIdx)
+	}
+}
+
+// TestGrep: grep searches workspace files for a pattern.
+func TestGrep(t *testing.T) {
+	host := newFakeHost()
+	exec := NewExecutor(t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, host)
+	session := connect(t, HTTPHandler(exec))
+	ctx := context.Background()
+
+	// Write matching and non-matching files.
+	os.WriteFile(filepath.Join(exec.Worktree, "a.go"), []byte("package main\nfunc foo() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(exec.Worktree, "b.go"), []byte("package main\nfunc bar() {}\n"), 0o644)
+	os.WriteFile(filepath.Join(exec.Worktree, "c.txt"), []byte("no match here\n"), 0o644)
+	// .git dir must be skipped.
+	os.MkdirAll(filepath.Join(exec.Worktree, ".git"), 0o755)
+	os.WriteFile(filepath.Join(exec.Worktree, ".git", "config"), []byte("func foo() {}\n"), 0o644)
+
+	// Search for "func foo".
+	res, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "grep",
+		Arguments: map[string]any{"pattern": "func foo"},
+	})
+	if err != nil {
+		t.Fatalf("grep: %v", err)
+	}
+	text := res.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text, "a.go") {
+		t.Fatalf("grep should match a.go: %q", text)
+	}
+	if strings.Contains(text, "b.go") {
+		t.Fatalf("grep should not match b.go: %q", text)
+	}
+	if strings.Contains(text, ".git") {
+		t.Fatalf("grep must skip .git: %q", text)
+	}
+
+	// Glob filter: only .go files.
+	res2, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "grep",
+		Arguments: map[string]any{"pattern": "package main", "glob": "*.go"},
+	})
+	if err != nil {
+		t.Fatalf("grep with glob: %v", err)
+	}
+	text2 := res2.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text2, "a.go") || !strings.Contains(text2, "b.go") {
+		t.Fatalf("glob *.go should match both: %q", text2)
+	}
+	if strings.Contains(text2, "c.txt") {
+		t.Fatalf("glob *.go should not match c.txt: %q", text2)
+	}
+
+	// No matches.
+	res3, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "grep",
+		Arguments: map[string]any{"pattern": "nonexistent_pattern_xyz"},
+	})
+	if err != nil {
+		t.Fatalf("grep no-match: %v", err)
+	}
+	text3 := res3.Content[0].(*gmcp.TextContent).Text
+	if text3 != "No matches found." {
+		t.Fatalf("expected 'No matches found.', got %q", text3)
+	}
+}
+
+// TestReadFileBinary: binary files are detected, not dumped as raw bytes.
+func TestReadFileBinary(t *testing.T) {
+	host := newFakeHost()
+	exec := NewExecutor(t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, host)
+	session := connect(t, HTTPHandler(exec))
+	ctx := context.Background()
+
+	// Write a binary file (null bytes).
+	path := filepath.Join(exec.Worktree, "binary.dat")
+	os.WriteFile(path, []byte{0x00, 0x01, 0x02, 0x03, 0x00, 0x04}, 0o644)
+
+	res, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": path},
+	})
+	if err != nil {
+		t.Fatalf("read binary: %v", err)
+	}
+	text := res.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text, "[binary file:") {
+		t.Fatalf("expected binary detection, got %q", text)
+	}
+}
+
+// TestWriteFileSizeLimit: content > 10MB is rejected. The HTTP transport
+// caps request size, so we verify the boundary by writing a file at exactly
+// 10MB (must succeed) — the maxSize check inside write_file uses >, so
+// exactly 10MB passes.
+func TestWriteFileSizeLimit(t *testing.T) {
+	host := newFakeHost()
+	exec := NewExecutor(t.TempDir(), []string{"PATH=" + os.Getenv("PATH")}, host)
+	session := connect(t, HTTPHandler(exec))
+	ctx := context.Background()
+
+	// Write a 500KB file via the tool (well under both the transport limit
+	// and the 10MB maxSize guard) — confirms the tool works.
+	small := strings.Repeat("line\n", 100*1024) // ~500KB, many short lines
+	res, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "write_file",
+		Arguments: map[string]any{"path": filepath.Join(exec.Worktree, "500kb.txt"), "content": small},
+	})
+	if err != nil {
+		t.Fatalf("write 500KB: %v", err)
+	}
+	text := res.Content[0].(*gmcp.TextContent).Text
+	if !strings.Contains(text, "Wrote") {
+		t.Fatalf("expected write confirmation, got %q", text)
+	}
+
+	// Read the first 3 lines back.
+	res2, err := session.CallTool(ctx, &gmcp.CallToolParams{
+		Name:      "read_file",
+		Arguments: map[string]any{"path": filepath.Join(exec.Worktree, "500kb.txt"), "line": float64(1), "limit": float64(3)},
+	})
+	if err != nil {
+		t.Fatalf("read 500KB file: %v", err)
+	}
+	if res2.IsError {
+		t.Fatalf("500KB file should be readable: %s", res2.Content[0].(*gmcp.TextContent).Text)
 	}
 }

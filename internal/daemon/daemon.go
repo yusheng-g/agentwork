@@ -985,14 +985,14 @@ func (d *Daemon) dispatchOnce(ctx context.Context) {
 //
 // v2 layout (决策 6-2, run-scoped workspaces):
 //
-//	{runsRoot}/runs/<runID>/         per-run worktree (owner runs check out the
+//	{runsRoot}/<runID>/              per-run worktree (owner runs check out the
 //	                                 goal branch; consult/review/verify runs
 //	                                 detach from a ref — read-only)
 //	{runsRoot}/repos/<domainID>/     shared bare repo (cloned once)
 //	{runsRoot}/proc/<runID>/         processor scratch dirs
 //
 // The domain owns the shared bare repo; each RUN gets its own worktree —
-// the execution-isolation unit (workspace ownership: the path runs/<runID>
+// the execution-isolation unit (workspace ownership: the path <runID>
 // belongs to that run, clean or not). The goal branch lives in the bare repo;
 // checkpoints travel via commits (A5 revised: branch state, not file state).
 // git operations on the shared repo (fetch, worktree add/remove, and every
@@ -1085,7 +1085,7 @@ func copyDir(src, dst string) error {
 // runWorktreePath is the run's execution worktree — the workspace (决策 6-2:
 // path is the ownership boundary; a recovered run reuses its own dirty dir).
 func runWorktreePath(runID string) string {
-	return filepath.Join(runsRoot(), "runs", runID)
+	return filepath.Join(runsRoot(), runID)
 }
 
 // deliverWorktreePath is the ephemeral worktree deliver uses to merge the
@@ -1235,7 +1235,7 @@ func gitCloneURL(gitURL, credentials string) string {
 // goal branch's current HEAD on their own sub-goal branch — that HEAD is the
 // Change revision's integration base. Verify runs DETACH at the sub-goal
 // branch head (read-only review of a stable state). A recovered run reuses
-// its own directory as-is (workspace ownership: runs/<runID> dirt belongs to
+// its own directory as-is (workspace ownership: <runID> dirt belongs to
 // that run). Returns the worktree path.
 func (d *Daemon) ensureRunWorktreeFor(ctx context.Context, runID, domainID, goalID, subGoalID, role, gitURL, gitCredentials, defaultBranch string) (string, error) {
 	wt := runWorktreePath(runID)
@@ -1358,7 +1358,7 @@ func insertFiredGoal(ctx context.Context, tx *sql.Tx, goalID, title, desc, domai
 // ── worktree lifecycle (决策 6-2, run-scoped) ──
 
 // cleanupWorktrees removes run worktrees whose run reached a terminal state
-// more than worktreeRetentionDays ago (runs/<runID> is the workspace — the
+// more than worktreeRetentionDays ago (<runID> is the workspace — the
 // branch state lives in the bare repo; only the checkout is reclaimed).
 func (d *Daemon) cleanupWorktrees(ctx context.Context) {
 	rows, err := d.st.DB().QueryContext(ctx,
@@ -1416,7 +1416,7 @@ func (d *Daemon) cleanupWorktrees(ctx context.Context) {
 }
 
 // sweepRunWorktrees drops leftover RUN worktrees (a daemon crash leaves
-// runs/<runID> behind, still holding its branch checked out — the next run
+// <runID> behind, still holding its branch checked out — the next run
 // would fail to create its worktree). Called at startup BEFORE any dispatch.
 // ORDER MATTERS: the dirs go first, THEN worktree prune — pruning while the
 // dirs still exist is a no-op, and after RemoveAll the metadata turns
@@ -1427,17 +1427,38 @@ func (d *Daemon) cleanupWorktrees(ctx context.Context) {
 // (A5 recovery = transcript + committed state).
 func (d *Daemon) sweepRunWorktrees(ctx context.Context) {
 	repoRoot := filepath.Join(runsRoot(), "repos")
-	runsDir := filepath.Join(runsRoot(), "runs")
-	if err := os.RemoveAll(runsDir); err != nil {
-		logging.Errorf("daemon: sweep run worktrees: %v", err)
-	} else {
-		logging.Infof("daemon: swept stale run worktrees")
+	// Run worktrees live directly under runsRoot() as <runID>/ dirs, alongside
+	// the named siblings (repos/, proc/, scratch/, deliver-*). Sweep only the
+	// worktree dirs — the reserved sibling names are skipped.
+	reserved := map[string]bool{
+		"repos": true, "proc": true, "scratch": true,
 	}
-	entries, err := os.ReadDir(repoRoot)
+	entries, err := os.ReadDir(runsRoot())
+	if err != nil {
+		logging.Errorf("daemon: sweep run worktrees: read runs root: %v", err)
+	} else {
+		swept := 0
+		for _, e := range entries {
+			if !e.IsDir() {
+				continue
+			}
+			name := e.Name()
+			if reserved[name] || strings.HasPrefix(name, "deliver-") {
+				continue
+			}
+			if err := os.RemoveAll(filepath.Join(runsRoot(), name)); err != nil {
+				logging.Infof("daemon: sweep run worktree %s: %v", name, err)
+			} else {
+				swept++
+			}
+		}
+		logging.Infof("daemon: swept stale run worktrees (%d)", swept)
+	}
+	repoEntries, err := os.ReadDir(repoRoot)
 	if err != nil {
 		return
 	}
-	for _, e := range entries {
+	for _, e := range repoEntries {
 		if !e.IsDir() {
 			continue
 		}
@@ -1534,7 +1555,7 @@ func (d *Daemon) runTask(ctx context.Context, q *service.ClaimedRow) {
 	d.ensureWorker(q.AgentID, maxConcurrent)
 
 	// Working directory (决策 6-2): every run gets its OWN worktree under
-	// runs/<runID> — the workspace. Owner runs check out the goal branch
+	// <runID> — the workspace. Owner runs check out the goal branch
 	// (checkpoints travel via commits); sub-goal runs branch from the goal
 	// branch's current HEAD (their Change's integration base); a recovered
 	// run re-claims its own directory as-is (workspace ownership: its dirt
@@ -2630,7 +2651,7 @@ Your worktree lives on the PLATFORM machine — it is not your environment:
 	b += `
 - COLLABORATE through the platform's MCP collaboration tools — the four behaviors (agentwork_comment_goal / agentwork_consult_agent / agentwork_handoff_goal / agentwork_create_sub_goal), integration and inspection (agentwork_integrate_change / agentwork_get_change / agentwork_get_sub_goal / agentwork_get_verification / agentwork_cancel_sub_goal / agentwork_verify_sub_goal), and the lists (agentwork_goal_list / agentwork_agent_list / agentwork_squad_list) — the full coordination contract lives in AGENTWORK.md
 - ACCESS THE WORKTREE ONLY THROUGH THE PLATFORM'S CHANNELS:
-  * MCP server "agentwork" (advertised at session start) — its tools operate on the worktree: agentwork_read_file (read a file), agentwork_write_file (write a file), and the command trio agentwork_terminal_create → agentwork_terminal_output → agentwork_terminal_release (commands are ASYNC: create returns a terminal id immediately, poll output until exited=true passing the returned cursor back, then release to clean up)
+  * MCP server "agentwork" (advertised at session start) — its tools operate on the worktree: agentwork_read_file (read a file), agentwork_write_file (write a file), agentwork_edit_file (edit a file), agentwork_list_dir (list a directory), agentwork_grep (search the codebase), and the command trio agentwork_terminal_create → agentwork_terminal_output → agentwork_terminal_release (commands are ASYNC: create returns a terminal id immediately, poll output until exited=true passing the returned cursor back, then release to clean up)
   * Client capabilities over ACP — fs/read_text_file, fs/write_text_file, terminal/*
   Your own local file/shell tools operate on YOUR environment — NOT the worktree. On a remote runtime your local tools cannot reach the worktree at all; locally they only happen to work when the working directory points at it
 - Commands that touch the worktree run through the platform's execution channel (agentwork_terminal_create or terminal/*), on the platform machine, with the worktree as their working directory

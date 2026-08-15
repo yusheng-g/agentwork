@@ -31,7 +31,7 @@ import (
 // moment.
 type runEnvironment struct {
 	runID, goalID, agentID string
-	workdir                string // the run's per-run worktree, runs/<runID> (default terminal cwd)
+	workdir                string // the run's per-run worktree, <runID> (default terminal cwd)
 	serverURL              string // AGENTWORK_SERVER_URL for the CLI
 	tm                     *terminalManager
 }
