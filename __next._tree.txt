@@ -1,0 +1,2 @@
+:HL["/agentwork/_next/static/chunks/3wod58ogsp6yt.css","style"]
+0:{"tree":{"name":"","param":null,"prefetchHints":16,"slots":{"children":{"name":"__PAGE__","param":null,"prefetchHints":0,"slots":null}}},"staleTime":300,"buildId":"qI5VBeW5NSvqb0r5AFz8_"}

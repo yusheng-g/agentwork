@@ -1,0 +1,6 @@
+1:"$Sreact.fragment"
+3:I[97367,["/agentwork/_next/static/chunks/05-c3ty_6dwfk.js","/agentwork/_next/static/chunks/14mrh2-p_w84d.js"],"OutletBoundary"]
+4:"$Sreact.suspense"
+2:["$","a",null,{"href":"en/","children":"agentwork"}]
+0:{"rsc":["$","$1","c",{"children":[[["$","head",null,{"children":[["$","meta",null,{"httpEquiv":"refresh","content":"0; url=en/"}],["$","title",null,{"children":"agentwork"}]]}],["$","noscript",null,{"children":"$2"}]],null,["$","$L3",null,{"children":["$","$4",null,{"name":"Next.MetadataOutlet","children":"$@5"}]}]]}],"isPartial":false,"staleTime":300,"varyParams":null,"buildId":"qI5VBeW5NSvqb0r5AFz8_"}
+5:null
