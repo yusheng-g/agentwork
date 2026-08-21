@@ -117,7 +117,7 @@ func (s *SkillService) createSkillFromArchive(ctx context.Context, name, descrip
 	}
 	dir := skillDir(sk.ID)
 	if files != nil {
-		if err := s.writeFiles(sk.ID, files); err != nil {
+		if err := s.writeSkillFilesAndArchive(sk.ID, files); err != nil {
 			_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM skill WHERE id=?`, sk.ID)
 			return nil, err
 		}
@@ -130,22 +130,15 @@ func (s *SkillService) createSkillFromArchive(ctx context.Context, name, descrip
 			_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM skill WHERE id=?`, sk.ID)
 			return nil, NewValidationError(err.Error())
 		}
-	}
-	// Normalize: store the archive as a FLAT zip (no top-level wrapper
-	// directory), rebuilt from the extracted dir. Regardless of whether the
-	// upload had a top-level skill/ folder, the stored package.zip is always
-	// flat — so config.push → CLI Extract sees one format and never re-detects
-	// a wrapper. The text-block path is already flat (files map keys are
-	// flat); the zip-upload path's Extract already stripped any wrapper, so
-	// the dir is flat either way — BuildFromDir just re-archives it.
-	archive, err := zipx.BuildFromDir(dir, "package.zip")
-	if err != nil {
-		_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM skill WHERE id=?`, sk.ID)
-		return nil, fmt.Errorf("normalize skill archive: %w", err)
-	}
-	if err := os.WriteFile(filepath.Join(dir, "package.zip"), archive, 0o644); err != nil {
-		_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM skill WHERE id=?`, sk.ID)
-		return nil, fmt.Errorf("store skill archive: %w", err)
+		archive, err := zipx.BuildFromDir(dir, "package.zip")
+		if err != nil {
+			_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM skill WHERE id=?`, sk.ID)
+			return nil, fmt.Errorf("normalize skill archive: %w", err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, "package.zip"), archive, 0o644); err != nil {
+			_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM skill WHERE id=?`, sk.ID)
+			return nil, fmt.Errorf("store skill archive: %w", err)
+		}
 	}
 	return sk, nil
 }
@@ -248,6 +241,57 @@ func (s *SkillService) writeFiles(skillID string, files map[string]string) error
 		if err := os.WriteFile(target, []byte(content), 0o644); err != nil {
 			return fmt.Errorf("write %s: %w", path, err)
 		}
+	}
+	return nil
+}
+
+// UpsertByName creates or updates a skill by name (the team-import path).
+// When the skill exists, its description is updated and its files are rebuilt
+// from the supplied map (the old files are wiped first). When it does not
+// exist, a new skill row is created the same way CreateFromZip creates one —
+// name/description are supplied by the caller (already parsed from the team
+// repo's SKILL.md by the import agent). Returns the skill.
+func (s *SkillService) UpsertByName(ctx context.Context, name, description string, files map[string]string) (*Skill, error) {
+	name = strings.TrimSpace(name)
+	if name == "" {
+		return nil, NewValidationError("skill name is required")
+	}
+	if files == nil {
+		files = map[string]string{}
+	}
+	var existingID string
+	_ = s.st.DB().QueryRowContext(ctx, `SELECT id FROM skill WHERE name=?`, name).Scan(&existingID)
+	if existingID != "" {
+		if _, err := s.st.DB().ExecContext(ctx,
+			`UPDATE skill SET description=? WHERE id=?`, description, existingID); err != nil {
+			return nil, fmt.Errorf("update skill %q: %w", name, err)
+		}
+		_ = os.RemoveAll(skillDir(existingID))
+		if err := s.writeSkillFilesAndArchive(existingID, files); err != nil {
+			return nil, err
+		}
+		return &Skill{ID: existingID, Name: name, Description: description}, nil
+	}
+	zipData, err := zipx.Build(files)
+	if err != nil {
+		return nil, NewValidationError(err.Error())
+	}
+	return s.createSkillFromArchive(ctx, name, description, zipData, files)
+}
+
+// writeSkillFilesAndArchive writes the file map to the skill's directory and
+// stores the normalized flat package.zip. Shared by create and update paths.
+func (s *SkillService) writeSkillFilesAndArchive(skillID string, files map[string]string) error {
+	dir := skillDir(skillID)
+	if err := s.writeFiles(skillID, files); err != nil {
+		return err
+	}
+	archive, err := zipx.BuildFromDir(dir, "package.zip")
+	if err != nil {
+		return fmt.Errorf("normalize skill archive: %w", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "package.zip"), archive, 0o644); err != nil {
+		return fmt.Errorf("store skill archive: %w", err)
 	}
 	return nil
 }

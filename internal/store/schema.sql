@@ -439,6 +439,29 @@ CREATE TABLE IF NOT EXISTS schedule_run (
 CREATE INDEX IF NOT EXISTS idx_schedule_run_schedule ON schedule_run(schedule_id, created_at DESC);
 CREATE UNIQUE INDEX IF NOT EXISTS uq_schedule_run_planned ON schedule_run(schedule_id, planned_at);
 
+-- team_import is a TEMPORARY tracking table for the team-definition-repo
+-- import processor run: the run that clones a team repo, has an agent explore
+-- it, and produces team.json (agents + skills + squad). The platform reads
+-- team.json and upserts the entities by name. runtime_id is the runtime ALL
+-- imported agents bind to (the team repo defines personas, not machines).
+-- git_url/credentials/branch persist from the HTTP request to daemon dispatch
+-- (the run may sit queued for seconds/minutes before claim). ImportTeam
+-- cleans up old completed/failed rows at the start of each import. status:
+-- pending|completed|failed.
+CREATE TABLE IF NOT EXISTS team_import (
+    id              TEXT PRIMARY KEY,
+    run_id          TEXT NOT NULL DEFAULT '',         -- the processor run (back-filled after enqueue)
+    runtime_id      TEXT NOT NULL DEFAULT '',         -- runtime bound to every imported agent
+    git_url         TEXT NOT NULL DEFAULT '',         -- team repo URL (read at dispatch time)
+    git_credentials TEXT NOT NULL DEFAULT '',         -- team repo token
+    default_branch  TEXT NOT NULL DEFAULT '',         -- team repo branch
+    status          TEXT NOT NULL DEFAULT 'pending',  -- pending|completed|failed
+    result          TEXT NOT NULL DEFAULT '',         -- JSON summary (agents/skills/squad created/updated)
+    created_at      TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_team_import_run ON team_import(run_id);
+
 -- settings: key-value daemon configuration (e.g. the Feishu connection
 -- credentials + receive target captured by the IM connect flow, M1). The
 -- IM module persists here so the daemon auto-reconnects on startup with no

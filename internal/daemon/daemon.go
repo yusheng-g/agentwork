@@ -146,6 +146,7 @@ type Daemon struct {
 	issueCloser   *issue.Closer         // M4-B: delivered goal → close its issue
 	intakeSvc     *notify.IntakeService // M4-B: multi-domain clarification draft store
 	lastIssuePoll time.Time             // last poll time (the interval is configurable)
+	teamImportSvc *service.TeamImportService // team-import processor run lifecycle
 
 	mu          sync.Mutex
 	workers     map[string]*agentWorker // agentID → per-agent scheduler
@@ -357,6 +358,12 @@ func New(st *store.Store, bus *events.Bus, addr string, protoReg *proto.Registry
 		}
 	})
 	return d
+}
+
+// SetTeamImportService wires the team-import processor-run lifecycle (called
+// after construction to avoid touching the already-long New signature).
+func (d *Daemon) SetTeamImportService(svc *service.TeamImportService) {
+	d.teamImportSvc = svc
 }
 
 // Run starts the dispatch loop. Blocks until ctx is cancelled.
@@ -1865,6 +1872,13 @@ func (d *Daemon) runProcessorTask(ctx context.Context, q *service.ClaimedRow) {
 		return
 	}
 
+	// The team-import run is a repo-domain processor run (same clone +
+	// worktree path as compile); only the artifact file differs.
+	artifactFiles := []string{"checks.json", "strength.txt", "metrics.json"}
+	if runType == "import" {
+		artifactFiles = []string{"team.json"}
+	}
+
 	var argsJSON, rtEnvJSON, procMachineID string
 	var maxConcurrent int
 	err = d.st.DB().QueryRowContext(ctx,
@@ -1881,10 +1895,22 @@ func (d *Daemon) runProcessorTask(ctx context.Context, q *service.ClaimedRow) {
 	// machine works the proc dir (repo compile: a detached worktree of
 	// origin/<default>) and uploads the artifact files with run.finished.
 	if procMachineID != "" {
+		// Git config source differs by run type: import runs read from the
+		// team_import tracking row (no domain/project is created); compile
+		// runs read from the domain row.
 		var dType, gitURL, gitCredentials, defaultBranch string
-		_ = d.st.DB().QueryRowContext(ctx,
-			`SELECT COALESCE(type,''), git_url, git_credentials, default_branch FROM domain WHERE id=?`, domainID).
-			Scan(&dType, &gitURL, &gitCredentials, &defaultBranch)
+		if runType == "import" {
+			if d.teamImportSvc != nil {
+				gitURL, gitCredentials, defaultBranch, _ = d.teamImportSvc.GitConfigForRun(ctx, q.RunID)
+			}
+			if gitURL == "" {
+				logging.Warnf("daemon: import run %s has no git config — team_import row missing", q.RunID)
+			}
+		} else {
+			_ = d.st.DB().QueryRowContext(ctx,
+				`SELECT COALESCE(type,''), git_url, git_credentials, default_branch FROM domain WHERE id=?`, domainID).
+				Scan(&dType, &gitURL, &gitCredentials, &defaultBranch)
+		}
 		var args []string
 		_ = json.Unmarshal([]byte(argsJSON), &args)
 		var rtEnv map[string]string
@@ -1900,7 +1926,7 @@ func (d *Daemon) runProcessorTask(ctx context.Context, q *service.ClaimedRow) {
 		d.dispatchToMachine(ctx, q, link.RunDispatchParams{
 			RunID: q.RunID, AgentID: q.AgentID, Attempt: q.Attempt, Token: q.Token,
 			Prompt: prompt, Proc: true, Scratch: dType == "scratch",
-			ArtifactFiles: []string{"checks.json", "strength.txt", "metrics.json"},
+			ArtifactFiles: artifactFiles,
 			DomainID: domainID, GitURL: gitURL, GitCredentials: gitCredentials, DefaultBranch: defaultBranch,
 			ACPSpawn: args, Env: dispatchEnv,
 		}, procMachineID)

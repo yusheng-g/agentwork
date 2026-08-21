@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/eushing/agentwork/internal/acp"
 	"github.com/eushing/agentwork/internal/events"
@@ -115,6 +116,43 @@ func (s *AgentService) Update(ctx context.Context, id string, a Agent) (*Agent, 
 		return nil, fmt.Errorf("update agent: %w", err)
 	}
 	return s.Get(ctx, id)
+}
+
+// UpsertByName creates or updates an agent by name (the team-import path).
+// When the agent exists, its description/system_prompt/skills are updated;
+// runtime_id is left unchanged (the team repo does not define machines). When
+// it does not exist, a new agent is created bound to the supplied runtimeID.
+// Returns the agent.
+func (s *AgentService) UpsertByName(ctx context.Context, name, description, systemPrompt, runtimeID string, skillIDs []string) (*Agent, error) {
+	if name = strings.TrimSpace(name); name == "" {
+		return nil, NewValidationError("agent name is required")
+	}
+	var existingID string
+	_ = s.st.DB().QueryRowContext(ctx, `SELECT id FROM agent WHERE name=?`, name).Scan(&existingID)
+	if existingID != "" {
+		if skillIDs == nil {
+			skillIDs = []string{}
+		}
+		skillsJSON, _ := json.Marshal(skillIDs)
+		if _, err := s.st.DB().ExecContext(ctx,
+			`UPDATE agent SET description=?, system_prompt=?, skills=? WHERE id=?`,
+			description, systemPrompt, string(skillsJSON), existingID); err != nil {
+			return nil, fmt.Errorf("update agent %q: %w", name, err)
+		}
+		return s.Get(ctx, existingID)
+	}
+	if runtimeID == "" {
+		return nil, NewValidationError(fmt.Sprintf("runtime_id is required for new agent %q", name))
+	}
+	a := Agent{
+		Name:         name,
+		Description:  description,
+		RuntimeID:    runtimeID,
+		SystemPrompt: systemPrompt,
+		Skills:       skillIDs,
+		MaxConcurrent: 1,
+	}
+	return s.Create(ctx, a)
 }
 
 func (s *AgentService) List(ctx context.Context) ([]Agent, error) {

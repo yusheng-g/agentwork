@@ -94,6 +94,10 @@ func main() {
 	domainSvc := service.NewDomainService(st, bus)
 	domainSvc.SetRunService(runSvc)
 
+	skillSvc := service.NewSkillService(st)
+	teamImportSvc := service.NewTeamImportService(st, bus)
+	teamImportSvc.SetDependencies(runSvc, agentSvc, skillSvc, squadSvc)
+
 	// M3 IM: the approval-card callbacks resolve through the goal layer; the
 	// owner's inbound messages become intake parse runs on the configured
 	// global parser agent (app_settings platform.intake_agent). The ask-card
@@ -111,13 +115,14 @@ func main() {
 	protoReg.Register("jsonrpc", jsonrpcbackend.New())
 
 	d := daemon.New(st, bus, *addr, protoReg, goalSvc, runSvc, commentSvc, agentSvc, squadSvc, schedSvc, imConn, qs, intakeSvc)
+	d.SetTeamImportService(teamImportSvc)
 	go func() {
 		if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logging.Errorf("daemon: %v", err)
 		}
 	}()
 
-	srv := server.New(st, bus, d, goalSvc, runSvc, commentSvc, squadSvc, schedSvc, domainSvc, imConn)
+	srv := server.New(st, bus, d, goalSvc, runSvc, commentSvc, squadSvc, schedSvc, domainSvc, imConn, teamImportSvc, skillSvc)
 	if err := srv.ListenAndServe(ctx, *addr); err != nil && !errors.Is(err, context.Canceled) {
 		logging.Fatalf("server: %v", err)
 	}

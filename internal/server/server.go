@@ -38,6 +38,8 @@ type Server struct {
 	schedSvc   *service.ScheduleService
 	domainSvc  *service.DomainService
 	imConn     *notify.Connector
+	teamImportSvc *service.TeamImportService
+	skillSvc      *service.SkillService
 }
 
 // statusWriter captures the response status for request logging (the MCP
@@ -52,8 +54,8 @@ func (w *statusWriter) WriteHeader(code int) {
 	w.ResponseWriter.WriteHeader(code)
 }
 
-func New(st *store.Store, bus *events.Bus, d *daemon.Daemon, goalSvc *service.GoalService, runSvc *service.RunService, commentSvc *service.CommentService, squadSvc *service.SquadService, schedSvc *service.ScheduleService, domainSvc *service.DomainService, imConn *notify.Connector) *Server {
-	return &Server{st: st, bus: bus, d: d, hub: ws.NewHub(bus), goalSvc: goalSvc, runSvc: runSvc, commentSvc: commentSvc, squadSvc: squadSvc, schedSvc: schedSvc, domainSvc: domainSvc, imConn: imConn}
+func New(st *store.Store, bus *events.Bus, d *daemon.Daemon, goalSvc *service.GoalService, runSvc *service.RunService, commentSvc *service.CommentService, squadSvc *service.SquadService, schedSvc *service.ScheduleService, domainSvc *service.DomainService, imConn *notify.Connector, teamImportSvc *service.TeamImportService, skillSvc *service.SkillService) *Server {
+	return &Server{st: st, bus: bus, d: d, hub: ws.NewHub(bus), goalSvc: goalSvc, runSvc: runSvc, commentSvc: commentSvc, squadSvc: squadSvc, schedSvc: schedSvc, domainSvc: domainSvc, imConn: imConn, teamImportSvc: teamImportSvc, skillSvc: skillSvc}
 }
 
 // ListenAndServe mounts routes and serves until ctx is cancelled.
@@ -73,7 +75,8 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 		IM:       s.imConn,
 		Daemon:   s.d,
 		Machines: machineSvc,
-		Skills:   service.NewSkillService(s.st),
+		Skills:   s.skillSvc,
+		TeamImport: s.teamImportSvc,
 		// M4-B: the real-time issue triggers (github + gitcode) share the
 		// poller's create path (source_ref idempotency makes webhook + poll
 		// racing safe). The shared secret lives in app_settings

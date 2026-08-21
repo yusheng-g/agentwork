@@ -1,4 +1,4 @@
-import type { Runtime, Agent, Goal, Run, Comment, Squad, SquadMember, Schedule, Domain, Checks, TimelineItem } from "./types";
+import type { Runtime, Agent, Goal, Run, Comment, Squad, SquadMember, Schedule, Domain, Checks, TimelineItem, TeamImport, TeamImportResponse } from "./types";
 
 // 默认走同源 /backend/*（Next rewrites 转发到本机 daemon 7373）——反代出
 // 去时浏览器无需直连 daemon。本地直连场景可显式设置 NEXT_PUBLIC_API_URL。
@@ -274,3 +274,14 @@ export const listScheduleRuns = (id: string) =>
   api<import("./types").ScheduleRun[]>(`/schedules/${id}/runs`);
 export const setScheduleEnabled = (id: string, enabled: boolean) =>
   api<Schedule>(`/schedules/${id}/enabled`, { method: "PUT", body: JSON.stringify({ enabled }) });
+
+// ── Team import (processor-run-driven) ──
+export const importTeam = (body: {
+  git_url: string;
+  git_credentials?: string;
+  default_branch?: string;
+  processor_agent_id: string;
+  runtime_id: string;
+}) => api<TeamImportResponse>("/teams/import", { method: "POST", body: JSON.stringify(body) });
+export const getTeamImport = (runId: string) =>
+  api<TeamImport>(`/teams/import/${runId}`);

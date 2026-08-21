@@ -45,6 +45,8 @@ type Handlers struct {
 	Machines *service.MachineService
 	// Skills is the skills library (CLI 分支 Phase 4).
 	Skills *service.SkillService
+	// TeamImport is the team-definition-repo import processor-run lifecycle.
+	TeamImport *service.TeamImportService
 }
 
 func (h *Handlers) Mount(mux *http.ServeMux) {
@@ -101,6 +103,8 @@ func (h *Handlers) Mount(mux *http.ServeMux) {
 	mux.HandleFunc("GET /skills", h.listSkills)
 	mux.HandleFunc("POST /skills", h.createSkill)
 	mux.HandleFunc("DELETE /skills/{id}", h.deleteSkill)
+	mux.HandleFunc("POST /teams/import", h.importTeam)
+	mux.HandleFunc("GET /teams/import/{runId}", h.getTeamImport)
 	mux.HandleFunc("POST /domains", h.createDomain)
 	mux.HandleFunc("GET /domains/{id}", h.getDomain)
 	mux.HandleFunc("PUT /domains/{id}", h.updateDomain)
@@ -480,27 +484,10 @@ func (h *Handlers) createDomain(w http.ResponseWriter, r *http.Request) {
 	}
 	// 决策 6-24 延伸：repo 域必须通过 git 连接测试才能创建——仓库/分支/token
 	// 在配置期验证，而不是留给第一次 run 的 clone/fetch 失败。scratch 无
-	// git_url 跳过；URL 留空交给 Create 自己的校验（报错更准确）。这是
-	// 与「测试连接」按钮同一个探针（幂等只读）。
-	if d.Type != "scratch" && d.GitURL != "" && h.Daemon != nil {
-		res := h.Daemon.TestDomainGit(r.Context(), d.GitURL, d.DefaultBranch, d.GitCredentials)
-		if !res.OK {
-			writeErr(w, http.StatusBadRequest, fmt.Errorf("git connection test failed: %s", res.Error))
+	// git_url 跳过；URL 留空交给 Create 自己的校验（报错更准确）。
+	if d.Type != "scratch" {
+		if _, ok := h.testGitAndRespond(w, r, d.GitURL, d.GitCredentials, &d.DefaultBranch); !ok {
 			return
-		}
-		if !res.BranchExists {
-			if len(res.Refs) == 0 {
-				writeErr(w, http.StatusBadRequest, errors.New("repository is empty (no branches) — cannot be used as a project repo"))
-			} else {
-				writeErr(w, http.StatusBadRequest, fmt.Errorf("branch %q does not exist on the repository (remote branches: %s)", res.ResolvedBranch, strings.Join(res.Refs, ", ")))
-			}
-			return
-		}
-		// 测试解析的真相落到 domain 上：body 没传分支时（创建表单无分支
-		// 字段），存远端真实 HEAD——run 建分支和交付 push 都用它。否则
-		// master 仓会存 "main"，第一次 run 从 origin/main 建分支失败。
-		if d.DefaultBranch == "" {
-			d.DefaultBranch = res.ResolvedBranch
 		}
 	}
 	out, err := h.Domain.Create(r.Context(), d)
@@ -592,6 +579,38 @@ func (h *Handlers) deleteSkill(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
+// ── team import (processor-run-driven) ──
+
+func (h *Handlers) importTeam(w http.ResponseWriter, r *http.Request) {
+	var req service.ImportRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if h.TeamImport == nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("team import service not configured"))
+		return
+	}
+	if _, ok := h.testGitAndRespond(w, r, req.GitURL, req.GitCredentials, &req.DefaultBranch); !ok {
+		return
+	}
+	ti, run, err := h.TeamImport.ImportTeam(r.Context(), req)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	writeJSON(w, map[string]any{"team_import": ti, "run": run}, nil)
+}
+
+func (h *Handlers) getTeamImport(w http.ResponseWriter, r *http.Request) {
+	if h.TeamImport == nil {
+		writeErr(w, http.StatusInternalServerError, errors.New("team import service not configured"))
+		return
+	}
+	out, err := h.TeamImport.GetByRun(r.Context(), r.PathValue("runId"))
+	writeJSON(w, out, err)
+}
+
 func (h *Handlers) getDomain(w http.ResponseWriter, r *http.Request) {
 	out, err := h.Domain.Get(r.Context(), r.PathValue("id"))
 	writeJSON(w, out, err)
@@ -619,23 +638,9 @@ func (h *Handlers) updateDomain(w http.ResponseWriter, r *http.Request) {
 			gitChanged := old.GitURL != d.GitURL ||
 				old.DefaultBranch != d.DefaultBranch ||
 				old.GitCredentials != d.GitCredentials
-			if gitChanged && d.GitURL != "" {
-				res := h.Daemon.TestDomainGit(r.Context(), d.GitURL, d.DefaultBranch, d.GitCredentials)
-				if !res.OK {
-					writeErr(w, http.StatusBadRequest, fmt.Errorf("git connection test failed: %s", res.Error))
+			if gitChanged {
+				if _, ok := h.testGitAndRespond(w, r, d.GitURL, d.GitCredentials, &d.DefaultBranch); !ok {
 					return
-				}
-				if !res.BranchExists {
-					if len(res.Refs) == 0 {
-						writeErr(w, http.StatusBadRequest, errors.New("repository is empty (no branches) — cannot be used as a project repo"))
-					} else {
-						writeErr(w, http.StatusBadRequest, fmt.Errorf("branch %q does not exist on the repository (remote branches: %s)", res.ResolvedBranch, strings.Join(res.Refs, ", ")))
-					}
-					return
-				}
-				// 分支留空（表单没填）时写回远端真实 HEAD，同 create。
-				if d.DefaultBranch == "" {
-					d.DefaultBranch = res.ResolvedBranch
 				}
 			}
 		}
@@ -874,6 +879,33 @@ func (h *Handlers) imDisconnect(w http.ResponseWriter, r *http.Request) {
 }
 
 // ── helpers ──
+
+// testGitAndRespond runs the config-time git probe (决策 6-24) and writes an
+// error response on failure. Returns the resolved branch and true on success,
+// "" and false on failure (the error response is already written). When the
+// caller's branch field is empty, it is back-filled with the remote's HEAD.
+func (h *Handlers) testGitAndRespond(w http.ResponseWriter, r *http.Request, gitURL, gitCredentials string, branch *string) (string, bool) {
+	if gitURL == "" || h.Daemon == nil {
+		return "", true
+	}
+	res := h.Daemon.TestDomainGit(r.Context(), gitURL, *branch, gitCredentials)
+	if !res.OK {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("git connection test failed: %s", res.Error))
+		return "", false
+	}
+	if !res.BranchExists {
+		if len(res.Refs) == 0 {
+			writeErr(w, http.StatusBadRequest, errors.New("repository is empty (no branches) — cannot be used as a project repo"))
+		} else {
+			writeErr(w, http.StatusBadRequest, fmt.Errorf("branch %q does not exist on the repository (remote branches: %s)", res.ResolvedBranch, strings.Join(res.Refs, ", ")))
+		}
+		return "", false
+	}
+	if *branch == "" {
+		*branch = res.ResolvedBranch
+	}
+	return res.ResolvedBranch, true
+}
 
 // writeJSON writes v as JSON, or an error response if err is non-nil. err is
 // mapped: ErrNotFound→404, ErrValidation→400, else 500.

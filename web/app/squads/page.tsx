@@ -2,9 +2,9 @@
 
 import { useState } from "react";
 import Link from "next/link";
-import { useSquads, useAgents, useCreateSquad, useAddSquadMember, useDeleteSquad, useGoalEvents } from "@/lib/queries";
-import { Button, PageHeader, Empty, Dialog, Field, inputCls, ConfirmDialog } from "@/components/ui";
-import type { Squad } from "@/lib/types";
+import { useSquads, useAgents, useRuntimes, useCreateSquad, useAddSquadMember, useDeleteSquad, useImportTeam, useTeamImport, useGoalEvents } from "@/lib/queries";
+import { Button, PageHeader, Empty, Dialog, Field, inputCls, Badge, ConfirmDialog } from "@/components/ui";
+import type { Squad, TeamImport } from "@/lib/types";
 
 export default function SquadsPage() {
   useGoalEvents();
@@ -13,21 +13,29 @@ export default function SquadsPage() {
   const createSquad = useCreateSquad();
   const deleteSquad = useDeleteSquad();
   const [showForm, setShowForm] = useState(false);
+  const [showImport, setShowImport] = useState(false);
+  const [importRunId, setImportRunId] = useState("");
   const [deleteTarget, setDeleteTarget] = useState<string | null>(null);
 
   const agentName = (aid: string) => agents?.find((a) => a.id === aid)?.name ?? aid;
+  const { data: importStatus } = useTeamImport(importRunId);
 
   return (
     <div className="p-8">
       <PageHeader
         title="Squad"
-        action={<Button onClick={() => setShowForm(true)}>+ 新建</Button>}
+        action={
+          <div className="flex gap-2">
+            <Button variant="outline" onClick={() => setShowImport(true)}>导入团队</Button>
+            <Button onClick={() => setShowForm(true)}>+ 新建</Button>
+          </div>
+        }
       />
 
       {isLoading ? (
         <div className="text-sm text-zinc-400 py-16 text-center">加载中…</div>
       ) : !squads || squads.length === 0 ? (
-        <Empty>暂无 Squad。点「+ 新建」创建一个。</Empty>
+        <Empty>暂无 Squad。点「+ 新建」创建一个，或「导入团队」从代码仓导入。</Empty>
       ) : (
         <div className="bg-white rounded-xl border border-zinc-200 overflow-hidden">
           <table className="w-full text-sm">
@@ -67,6 +75,17 @@ export default function SquadsPage() {
       )}
 
       {showForm && <NewSquadForm agents={agents} onClose={() => setShowForm(false)} />}
+      {showImport && (
+        <ImportTeamForm
+          agents={agents}
+          onClose={() => setShowImport(false)}
+          onSubmitted={(runId) => {
+            setShowImport(false);
+            setImportRunId(runId);
+          }}
+        />
+      )}
+      {importStatus && <ImportStatusCard ti={importStatus} onClose={() => setImportRunId("")} />}
       {deleteTarget && (
         <ConfirmDialog
           title="确认删除"
@@ -90,7 +109,6 @@ function NewSquadForm({
   const createSquad = useCreateSquad();
   const addMember = useAddSquadMember();
   const [name, setName] = useState("");
-  // 成员是第一概念：先勾选团队成员，再从中指定 leader / reviewer 角色。
   const [members, setMembers] = useState<string[]>([]);
   const [leaderId, setLeaderId] = useState("");
   const [reviewerId, setReviewerId] = useState("");
@@ -111,9 +129,6 @@ function NewSquadForm({
       { name, leader_id: leaderId, description, instructions },
       {
         onSuccess: (sq) => {
-          // Add every member; the picked reviewer gets role=reviewer
-          // (决策 4-4: the squad owns the who-reviews rule; the platform
-          // pulls role=reviewer members into review runs).
           const rest = members.filter((m) => m !== leaderId);
           const enqueue = (i: number) => {
             if (i >= rest.length) {
@@ -150,7 +165,7 @@ function NewSquadForm({
         <Field label="名称" hint="必填">
           <input value={name} onChange={(e) => setName(e.target.value)} className={inputCls} required placeholder="Squad 名称…" />
         </Field>
-        <Field label="成员" hint="三角色分工：leader = 协调者（拆解任务并分派给成员，不自己实现全部）；执行者 = 被 leader 分派干活的成员；reviewer = 审查者（进审批时被平台自动拉去审查）。先选成员（至少 leader），再从成员中指定 leader 和 reviewer">
+        <Field label="成员" hint="leader = 协调者；reviewer = 审查者（进审批时平台自动拉去审查）。先选成员，再指定 leader 和 reviewer">
           <div className="border border-zinc-200 rounded-lg divide-y divide-zinc-100 max-h-48 overflow-y-auto">
             {(agents ?? []).map((a) => (
               <label key={a.id} className="flex items-center gap-2 px-3 py-2 text-sm cursor-pointer hover:bg-zinc-50">
@@ -168,9 +183,9 @@ function NewSquadForm({
             ))}
           </select>
         </Field>
-        <Field label="审核者（reviewer）" hint="可选——squad 任务进审批时，平台会自动拉审核者审查（决策 4-4）">
+        <Field label="审核者（reviewer）" hint="可选——squad 任务进审批时，平台会自动拉审核者审查">
           <select value={reviewerId} onChange={(e) => setReviewerId(e.target.value)} className={inputCls}>
-            <option value="">无（不需要 agent 审查）</option>
+            <option value="">无</option>
             {memberAgents.filter((a) => a.id !== leaderId).map((a) => (
               <option key={a.id} value={a.id}>{a.name}</option>
             ))}
@@ -187,5 +202,186 @@ function NewSquadForm({
         )}
       </form>
     </Dialog>
+  );
+}
+
+function ImportTeamForm({
+  agents,
+  onClose,
+  onSubmitted,
+}: {
+  agents?: { id: string; name: string }[];
+  onClose: () => void;
+  onSubmitted: (runId: string) => void;
+}) {
+  const { data: runtimes } = useRuntimes();
+  const importMut = useImportTeam();
+  const [gitUrl, setGitUrl] = useState("");
+  const [credentials, setCredentials] = useState("");
+  const [branch, setBranch] = useState("");
+  const [processorAgent, setProcessorAgent] = useState("");
+  const [runtimeId, setRuntimeId] = useState("");
+
+  const activeRuntimes = runtimes?.filter((r) => r.status === "active") ?? [];
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!gitUrl || !processorAgent || !runtimeId) return;
+    importMut.mutate(
+      {
+        git_url: gitUrl,
+        git_credentials: credentials,
+        default_branch: branch,
+        processor_agent_id: processorAgent,
+        runtime_id: runtimeId,
+      },
+      {
+        onSuccess: (data) => onSubmitted(data.team_import.run_id),
+      },
+    );
+  };
+
+  return (
+    <Dialog
+      title="导入团队"
+      onClose={onClose}
+      wide
+      footer={
+        <>
+          <Button variant="outline" onClick={onClose}>取消</Button>
+          <Button type="submit" form="import-form" disabled={importMut.isPending || !gitUrl || !processorAgent || !runtimeId}>
+            {importMut.isPending ? "导入中…" : "开始导入"}
+          </Button>
+        </>
+      }
+    >
+      <div className="space-y-2">
+        <p className="text-sm text-zinc-500">
+          从代码仓导入团队定义。Agent 会克隆仓库、探索 team.md 及引用的角色和技能文件，
+          自动创建 agent、squad 和 skill。仓库格式不固定——agent 凭理解力解析。
+        </p>
+        <form id="import-form" onSubmit={handleSubmit} className="space-y-4">
+          <Field label="团队仓 Git URL" hint="https://github.com/org/demo-team.git">
+            <input
+              className={inputCls}
+              value={gitUrl}
+              onChange={(e) => setGitUrl(e.target.value)}
+              placeholder="https://github.com/org/demo-team.git"
+              required
+            />
+          </Field>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Git Token (可选)" hint="私有仓需要">
+              <input
+                className={inputCls}
+                type="password"
+                value={credentials}
+                onChange={(e) => setCredentials(e.target.value)}
+                placeholder="ghp_..."
+              />
+            </Field>
+            <Field label="默认分支 (可选)">
+              <input
+                className={inputCls}
+                value={branch}
+                onChange={(e) => setBranch(e.target.value)}
+                placeholder="main"
+              />
+            </Field>
+          </div>
+          <div className="grid grid-cols-2 gap-4">
+            <Field label="Processor Agent" hint="执行探索的 agent">
+              <select
+                className={inputCls}
+                value={processorAgent}
+                onChange={(e) => setProcessorAgent(e.target.value)}
+                required
+              >
+                <option value="">选择 agent…</option>
+                {agents?.map((a) => (
+                  <option key={a.id} value={a.id}>{a.name}</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Runtime" hint="导入的 agent 绑定到此 runtime">
+              <select
+                className={inputCls}
+                value={runtimeId}
+                onChange={(e) => setRuntimeId(e.target.value)}
+                required
+              >
+                <option value="">选择 runtime…</option>
+                {activeRuntimes.map((r) => (
+                  <option key={r.id} value={r.id}>{r.name}</option>
+                ))}
+              </select>
+            </Field>
+          </div>
+          {importMut.isError && (
+            <p className="text-sm text-red-500">{String(importMut.error?.message ?? "导入失败")}</p>
+          )}
+        </form>
+      </div>
+    </Dialog>
+  );
+}
+
+function ImportStatusCard({ ti, onClose }: { ti: TeamImport; onClose: () => void }) {
+  const result = (() => {
+    try {
+      return JSON.parse(ti.result);
+    } catch {
+      return ti.result;
+    }
+  })();
+
+  return (
+    <div className="mt-6 bg-white rounded-xl border border-zinc-200 p-6 space-y-3">
+      <div className="flex items-center justify-between">
+        <h3 className="text-sm font-semibold text-zinc-900">导入状态</h3>
+        <div className="flex items-center gap-2">
+          <Badge status={ti.status} />
+          <button onClick={onClose} className="text-xs text-zinc-400 hover:text-zinc-700">关闭</button>
+        </div>
+      </div>
+      <dl className="text-sm space-y-1">
+        <div className="flex gap-2">
+          <dt className="text-zinc-400 w-24">Run ID</dt>
+          <dd className="text-zinc-600 font-mono text-xs">{ti.run_id}</dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="text-zinc-400 w-24">Runtime</dt>
+          <dd className="text-zinc-600 font-mono text-xs">{ti.runtime_id}</dd>
+        </div>
+        <div className="flex gap-2">
+          <dt className="text-zinc-400 w-24">时间</dt>
+          <dd className="text-zinc-600">{new Date(ti.created_at).toLocaleString()}</dd>
+        </div>
+      </dl>
+      {ti.status === "pending" && (
+        <p className="text-sm text-blue-600">Agent 正在探索团队仓并生成 team.json…</p>
+      )}
+      {ti.status === "completed" && typeof result === "object" && result !== null && (
+        <div className="text-sm text-zinc-600 space-y-1">
+          <p>
+            导入完成：{result.agents ?? 0} 个 agent、{result.skills ?? 0} 个 skill
+            {result.has_squad ? "、1 个 squad" : ""}
+          </p>
+          {result.summary && (
+            <p className="text-zinc-400 text-xs">{String(result.summary).slice(0, 200)}</p>
+          )}
+        </div>
+      )}
+      {ti.status === "failed" && (
+        <p className="text-sm text-red-500">{ti.result}</p>
+      )}
+      {ti.status === "completed" && (
+        <div className="flex gap-2 pt-2">
+          <Link href="/agents" className="text-xs text-indigo-600 hover:text-indigo-800">查看 Agent →</Link>
+          <Link href="/squads" className="text-xs text-indigo-600 hover:text-indigo-800">查看 Squad →</Link>
+          <Link href="/skills" className="text-xs text-indigo-600 hover:text-indigo-800">查看 Skills →</Link>
+        </div>
+      )}
+    </div>
   );
 }

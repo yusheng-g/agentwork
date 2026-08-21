@@ -301,6 +301,26 @@ export interface LogLine {
   text: string;
 }
 
+// TeamImport is a TEMPORARY tracking row for a team-definition-repo import
+// processor run. git_url/credentials/branch persist from the HTTP request to
+// daemon dispatch. ImportTeam cleans up old completed/failed rows.
+export interface TeamImport {
+  id: string;
+  run_id: string;
+  runtime_id: string;
+  git_url: string;
+  git_credentials: string;
+  default_branch: string;
+  status: string; // pending|completed|failed
+  result: string; // JSON summary
+  created_at: string;
+}
+
+export interface TeamImportResponse {
+  team_import: TeamImport;
+  run: Run;
+}
+
 // WS event shape from the hub: {"topic":"goal:created","payload":{...}}
 export type WSTopic =
   | "goal:created" | "goal:assigned" | "goal:finished"
@@ -315,7 +335,8 @@ export type WSTopic =
   | "agent:created" | "agent:deleted"
   | "squad:created" | "squad:deleted" | "squad:member_added" | "squad:member_removed"
   | "schedule:created" | "schedule:fired"
-  | "domain:created" | "domain:deleted" | "domain:compiled" | "domain:compile_failed";
+  | "domain:created" | "domain:deleted" | "domain:compiled" | "domain:compile_failed"
+  | "team:import_enqueued" | "team:imported" | "team:import_failed";
 
 export interface WSEvent {
   topic: WSTopic;

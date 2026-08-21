@@ -449,6 +449,25 @@ func (d *Daemon) ingestProcessorFinished(ctx context.Context, p link.RunFinished
 		d.ingestIntakeArtifact(ctx, q, p.Artifacts["intake.json"])
 		return nil
 	}
+	if runType == "import" {
+		if d.teamImportSvc != nil {
+			if err := d.teamImportSvc.IngestImport(ctx, p.RunID, p.Artifacts, p.Summary); err != nil {
+				logging.Errorf("daemon: team import %s failed: %v", p.RunID, err)
+				d.failProcessorRun(ctx, q, err.Error())
+			} else {
+				if _, err := d.st.DB().ExecContext(ctx,
+					`UPDATE run SET status='completed', result_summary=?, finished_at=? WHERE id=?`,
+					p.Summary, nowStr(), q.RunID); err != nil {
+					logging.Errorf("daemon: finish import run %s: %v", q.RunID, err)
+				} else {
+					logging.Infof("daemon: team import run %s completed", q.RunID)
+				}
+			}
+		} else {
+			logging.Warnf("daemon: import run %s finished but teamImportSvc is nil — artifacts dropped", p.RunID)
+		}
+		return nil
+	}
 	d.storeProcessorArtifacts(ctx, q, domainID, p.Artifacts, p.Summary)
 	return nil
 }

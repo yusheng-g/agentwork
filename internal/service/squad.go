@@ -66,6 +66,60 @@ func (s *SquadService) Create(ctx context.Context, sq Squad) (*Squad, error) {
 	return &sq, nil
 }
 
+// UpsertByName creates or updates a squad by name (the team-import path).
+// leaderAgentID must be an existing agent id. When the squad exists, its
+// description/leader/instructions are updated and ALL members are cleared and
+// re-added (the team repo is the source of truth for the roster). When it does
+// not exist, a new squad is created. Returns the squad.
+func (s *SquadService) UpsertByName(ctx context.Context, name, description, leaderAgentID, instructions string, members []SquadMember) (*Squad, error) {
+	if name = strings.TrimSpace(name); name == "" {
+		return nil, NewValidationError("squad name is required")
+	}
+	if leaderAgentID == "" {
+		return nil, NewValidationError("leader_agent_id is required")
+	}
+	var existingID string
+	_ = s.st.DB().QueryRowContext(ctx, `SELECT id FROM squad WHERE name=?`, name).Scan(&existingID)
+	if existingID != "" {
+		if _, err := s.st.DB().ExecContext(ctx,
+			`UPDATE squad SET description=?, leader_id=?, instructions=? WHERE id=?`,
+			description, leaderAgentID, instructions, existingID); err != nil {
+			return nil, fmt.Errorf("update squad %q: %w", name, err)
+		}
+		if _, err := s.st.DB().ExecContext(ctx, `DELETE FROM squad_member WHERE squad_id=?`, existingID); err != nil {
+			return nil, fmt.Errorf("clear squad members: %w", err)
+		}
+		for _, m := range members {
+			m.SquadID = existingID
+			m.ID = newID()
+			m.CreatedAt = now()
+			if _, err := s.st.DB().ExecContext(ctx,
+				`INSERT INTO squad_member (id,squad_id,member_type,member_id,role,created_at) VALUES (?,?,?,?,?,?)`,
+				m.ID, m.SquadID, m.MemberType, m.MemberID, m.Role, m.CreatedAt); err != nil {
+				return nil, fmt.Errorf("insert squad_member: %w", err)
+			}
+		}
+		return s.Get(ctx, existingID)
+	}
+	sq := Squad{
+		Name:         name,
+		Description:  description,
+		LeaderID:     leaderAgentID,
+		Instructions: instructions,
+	}
+	out, err := s.Create(ctx, sq)
+	if err != nil {
+		return nil, err
+	}
+	for _, m := range members {
+		m.SquadID = out.ID
+		if _, err := s.AddMember(ctx, out.ID, m.MemberType, m.MemberID, m.Role); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
 func (s *SquadService) List(ctx context.Context) ([]Squad, error) {
 	rows, err := s.st.DB().QueryContext(ctx,
 		`SELECT id,name,description,leader_id,instructions,created_at FROM squad ORDER BY created_at`)
