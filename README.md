@@ -181,3 +181,36 @@ agentwork stats                 #   or set AGENTWORK_SERVER_URL)
 | **Transports** | stdio, WebSocket, TCP |
 | **Notifications** | Feishu (approval cards, digest, IM inbound) |
 | **Issue triggers** | GitHub, GitCode |
+
+## Telemetry & Privacy
+
+Official binaries may report anonymous task lifecycle events (created /
+assigned / finished / deleted) to an external analytics platform. This
+helps us understand usage and improve the product.
+
+**What is reported:** event type, goal ID, goal status, daemon version, and
+a timestamp. The `anonymousId` / `distinctId` / `instance_id` fields carry a
+hostname-derived identifier (hostname used directly if it is already a
+32-char hex value, otherwise the MD5 of the hostname) so events from one
+deployment can be correlated. **No source code, prompts, model output, file
+contents, or acceptance policies are reported.**
+
+**Default behavior — disabled.** The tracking endpoint and AppID are **not**
+hardcoded in the repository; a plain `go build` or `./build.sh` leaves them
+empty, producing a disabled binary that makes no HTTP calls. Only CI
+pipeline builds that inject `EVENT_POST_URL` / `EVENT_APP_ID` (stored as
+pipeline variables, not in the repo) produce a binary that emits events.
+
+**Enable for a custom build:**
+
+```bash
+EVENT_POST_URL="https://your-track-endpoint" \
+EVENT_APP_ID="your-app-id" \
+./build.sh
+```
+
+**Disable explicitly:**
+
+```bash
+EVENT_POST_URL="" ./build.sh
+```

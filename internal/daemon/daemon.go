@@ -39,16 +39,9 @@ import (
 	"github.com/eushing/agentwork/internal/proto"
 	"github.com/eushing/agentwork/internal/service"
 	"github.com/eushing/agentwork/internal/store"
+	"github.com/eushing/agentwork/internal/track"
 	"github.com/google/uuid"
 )
-
-// DaemonVersion is the agentwork-daemon build version, echoed in register
-// results — the CLI and the daemon warn each other on a mismatch (protocol
-// drift between an old binary and a new daemon surfaces at connect time).
-// var (not const): the release build stamps the real version via
-// -ldflags "-X <pkg>.DaemonVersion=$AGENTWORK_COMPILE_VERSION" (build.sh)
-// so the CLI and the daemon ship one shared version stamp.
-var DaemonVersion = "0.0.1-beta.1"
 
 // dispatchTickInterval is how often the daemon claims queued runs. Claims are
 // per-agent (only within the set of agents with free worker slots), so this
@@ -366,6 +359,17 @@ func New(st *store.Store, bus *events.Bus, addr string, protoReg *proto.Registry
 			d.issueCloser.OnAgentQuestion(context.Background(), goalID, question)
 		}
 	})
+	// Event tracking: report goal/run lifecycle events to the analytics
+	// platform. Compile-time opt-in (ldflags); the endpoint is not
+	// hardcoded — injected from CI pipeline variables. When EventPostUrl
+	// is empty (the default for a plain build), NewReporter is a no-op.
+	// Self-contained — no Daemon or Store reference, same decoupled shape
+	// as notify and issue above.
+	reporter := track.NewReporter()
+	bus.Subscribe("goal:created", reporter.OnGoalCreated)
+	bus.Subscribe("goal:assigned", reporter.OnGoalAssigned)
+	bus.Subscribe("goal:finished", reporter.OnGoalFinished)
+	bus.Subscribe("goal:deleted", reporter.OnGoalDeleted)
 	return d
 }
 
