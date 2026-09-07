@@ -1,8 +1,9 @@
 // Package store is the SQLite persistence layer.
 //
 // Single-file SQLite (WAL mode) at ~/.agentwork/agentwork.db by default.
-// Schema is applied on Open via schema.sql (CREATE TABLE IF NOT EXISTS) —
-// no migration tool for now.
+// Schema is applied on Open via schema.sql (CREATE TABLE IF NOT EXISTS) for
+// fresh installs, plus additive migrations from migrations/ for existing
+// databases (see migrate.go).
 package store
 
 import (
@@ -63,9 +64,31 @@ func Open(path string) (*Store, error) {
 		db.SetMaxOpenConns(1)
 	}
 
+	// Detect a fresh database (no user tables) BEFORE applying schema —
+	// after schema.sql runs, all tables exist and the count is meaningless.
+	var tableCount int
+	if err := db.QueryRow(
+		`SELECT count(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`,
+	).Scan(&tableCount); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("check existing tables: %w", err)
+	}
+	isFresh := tableCount == 0
+
+	// Apply full schema (CREATE TABLE IF NOT EXISTS). On a fresh install this
+	// creates every table; on an existing install it is a no-op for tables
+	// that already exist (new tables added to schema.sql are created here).
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("apply schema: %w", err)
+	}
+
+	// Run additive migrations (ALTER TABLE ADD COLUMN, new indexes, etc.)
+	// for existing databases. Fresh installs are baselined to the latest
+	// version since schema.sql already reflects the current state.
+	if err := migrate(db, isFresh); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
 	return &Store{db: db}, nil
