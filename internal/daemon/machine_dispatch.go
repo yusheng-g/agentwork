@@ -408,6 +408,13 @@ func (d *Daemon) finishMachineRun(ctx context.Context, p link.RunFinishedParams,
 		d.ingestProcessorFinished(ctx, p, runType, domainID)
 		return
 	}
+	// System-task goal runs (run_type != "", e.g. "import"): skip
+	// verification/gates (the task produces artifacts, not code), ingest
+	// via the handler, then Finish → reconcileSystemTaskRun auto-completes.
+	if runType != "" {
+		d.finishSystemTaskRun(ctx, p, runType)
+		return
+	}
 	if p.Status == "completed" {
 		// The platform verifies (invariant 9 — the worker never verifies
 		// its own work): setup+verify+guards run on the adopted branch,
@@ -418,17 +425,23 @@ func (d *Daemon) finishMachineRun(ctx context.Context, p link.RunFinishedParams,
 			p.Summary = failReport
 		}
 	}
-	d.flushRunMessages(ctx, p.RunID)
-	d.machineLastEventMu.Lock()
-	delete(d.machineLastSeq, p.RunID)
-	delete(d.machineLastEvent, p.RunID)
-	delete(d.machineRunMachine, p.RunID)
-	d.machineLastEventMu.Unlock()
+	d.cleanupMachineRunState(ctx, p.RunID)
 	if err := d.runSvc.Finish(ctx, p.RunID, p.Status, p.Summary); err != nil && !errors.Is(err, service.ErrRunAlreadyTerminal) {
 		logging.Infof("machine: finish run %s: %v", p.RunID, err)
 		return
 	}
 	logging.Infof("machine: run %s finished (%s)", p.RunID, p.Status)
+}
+
+// cleanupMachineRunState flushes queued messages and clears the machine's
+// per-run tracking maps. Called by both finishMachineRun and finishSystemTaskRun.
+func (d *Daemon) cleanupMachineRunState(ctx context.Context, runID string) {
+	d.flushRunMessages(ctx, runID)
+	d.machineLastEventMu.Lock()
+	delete(d.machineLastSeq, runID)
+	delete(d.machineLastEvent, runID)
+	delete(d.machineRunMachine, runID)
+	d.machineLastEventMu.Unlock()
 }
 
 // ingestProcessorFinished completes a machine-dispatched processor run
@@ -449,68 +462,45 @@ func (d *Daemon) ingestProcessorFinished(ctx context.Context, p link.RunFinished
 		d.ingestIntakeArtifact(ctx, q, p.Artifacts["intake.json"], runType)
 		return nil
 	}
-	if runType == "import" {
-		if d.teamImportSvc != nil {
-			ti, squadName, err := d.teamImportSvc.IngestImport(ctx, p.RunID, p.Artifacts, p.Summary)
-			if err != nil {
-				logging.Errorf("daemon: team import %s failed: %v", p.RunID, err)
-				d.failProcessorRun(ctx, q, err.Error())
-			} else {
-				if _, err := d.st.DB().ExecContext(ctx,
-					`UPDATE run SET status='completed', result_summary=?, finished_at=? WHERE id=?`,
-					p.Summary, nowStr(), q.RunID); err != nil {
-					logging.Errorf("daemon: finish import run %s: %v", q.RunID, err)
-				} else {
-					logging.Infof("daemon: team import run %s completed", q.RunID)
-				}
-				d.notifyTeamImportComplete(ctx, ti, squadName)
-			}
-		} else {
-			logging.Warnf("daemon: import run %s finished but teamImportSvc is nil — artifacts dropped", p.RunID)
-		}
-		return nil
-	}
 	d.storeProcessorArtifacts(ctx, q, domainID, p.Artifacts, p.Summary)
 	return nil
 }
 
-func (d *Daemon) notifyTeamImportComplete(ctx context.Context, ti *service.TeamImport, squadName string) {
-	var result struct {
-		Agents   int    `json:"agents"`
-		Skills   int    `json:"skills"`
-		HasSquad bool   `json:"has_squad"`
+// finishSystemTaskRun completes a system-task goal run (run_type != "").
+// On success, the handler's IngestArtifacts processes the agent's output;
+// then Finish triggers reconcileSystemTaskRun which auto-completes the goal
+// (done/failed — no gates, no review, no retry). The human-readable summary
+// from IngestArtifacts flows to the goal feed comment and the generic
+// goal:finished IM card.
+func (d *Daemon) finishSystemTaskRun(ctx context.Context, p link.RunFinishedParams, runType string) {
+	handler, ok := d.systemTasks.Lookup(runType)
+	if !ok {
+		logging.Errorf("daemon: system-task run %s: no handler for type %q", p.RunID, runType)
+		d.flushRunMessages(ctx, p.RunID)
+		if err := d.runSvc.Finish(ctx, p.RunID, "failed", "no system task handler for type: "+runType); err != nil && !errors.Is(err, service.ErrRunAlreadyTerminal) {
+			logging.Infof("daemon: finish system-task run %s: %v", p.RunID, err)
+		}
+		return
 	}
-	_ = json.Unmarshal([]byte(ti.Result), &result)
-	summary := fmt.Sprintf("✅ 团队导入完成：%d 个 agent、%d 个 skill", result.Agents, result.Skills)
-	if result.HasSquad {
-		summary += "、1 个 squad"
-	}
-		body := summary
-	if squadName != "" {
-		sq, err := d.resolveSquadByName(ctx, squadName)
-		if err == nil {
-			body += "\n\n**👥 " + sq.Name + "**"
-			if sq.Description != "" {
-				body += "\n\n**描述：** " + firstLineIn(sq.Description)
-			}
-			body += "\n\n**leader：** " + d.agentDisplayName(ctx, sq.LeaderID)
-			if sq.Instructions != "" {
-				body += "\n\n**协作规则：** " + truncateIn(sq.Instructions, 200)
-			}
-			members, err := d.squadSvc.ListMembers(ctx, sq.ID)
-			if err == nil && len(members) > 0 {
-				body += "\n\n**成员：**"
-				for _, m := range members {
-					body += "  \n　- " + d.agentDisplayName(ctx, m.MemberID) + "（" + m.Role + "）"
-				}
-			} else {
-				body += "\n\n**成员：** （无）"
-			}
+
+	resultSummary := p.Summary
+	if p.Status == "completed" {
+		rs, err := handler.IngestArtifacts(ctx, p.RunID, p.Artifacts, p.Summary)
+		if err != nil {
+			logging.Errorf("daemon: system-task %s ingest failed: %v", p.RunID, err)
+			p.Status = "failed"
+			p.Summary = err.Error()
+		} else {
+			resultSummary = rs
 		}
 	}
-	if n := d.imNotifier(); n != nil {
-		n.SendMilestoneCard("✅", "green", "团队导入完成", body)
+
+	d.cleanupMachineRunState(ctx, p.RunID)
+	if err := d.runSvc.Finish(ctx, p.RunID, p.Status, resultSummary); err != nil && !errors.Is(err, service.ErrRunAlreadyTerminal) {
+		logging.Infof("daemon: finish system-task run %s: %v", p.RunID, err)
+		return
 	}
+	logging.Infof("machine: system-task run %s finished (%s)", p.RunID, p.Status)
 }
 
 // runMachineWatchdog supervises a dispatched run. Two signals, two policies:

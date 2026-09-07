@@ -316,7 +316,7 @@ export const listScheduleRuns = (id: string) =>
 export const setScheduleEnabled = (id: string, enabled: boolean) =>
   api<Schedule>(`/schedules/${id}/enabled`, { method: "PUT", body: JSON.stringify({ enabled }) });
 
-// ── Team import (processor-run-driven) ──
+// ── Team import (system-task-goal-driven) ──
 export const importTeam = (body: {
   git_url: string;
   git_credentials?: string;

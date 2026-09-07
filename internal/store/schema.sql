@@ -454,7 +454,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_schedule_run_planned ON schedule_run(schedu
 -- pending|completed|failed.
 CREATE TABLE IF NOT EXISTS team_import (
     id              TEXT PRIMARY KEY,
-    run_id          TEXT NOT NULL DEFAULT '',         -- the processor run (back-filled after enqueue)
+    run_id          TEXT NOT NULL DEFAULT '',         -- the run executing the import (back-filled after enqueue)
+    goal_id         TEXT NOT NULL DEFAULT '',         -- the system-task goal created for this import
     git_url         TEXT NOT NULL DEFAULT '',         -- team repo URL (read at dispatch time)
     git_credentials TEXT NOT NULL DEFAULT '',         -- team repo token
     default_branch  TEXT NOT NULL DEFAULT '',         -- team repo branch

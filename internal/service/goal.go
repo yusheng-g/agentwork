@@ -52,6 +52,11 @@ type Goal struct {
 	// CurrentAgentID is the agent of the goal's latest running/queued run —
 	// the list card's "who is working right now" ('' = nobody in flight).
 	CurrentAgentID string `json:"current_agent_id"`
+	// RunType stamps the first run's run_type for system-task goals (e.g.
+	// "import"). Set by CreateSystemTaskGoal; stamped on the enqueued run
+	// INSIDE Create's transaction to avoid a post-commit race where Claim
+	// picks up the run before run_type is set. Empty for normal goals.
+	RunType string `json:"-"`
 }
 
 // goalRunContext is what ReconcileOnRunEnd reasons about. Carried separately
@@ -83,6 +88,10 @@ type goalRunContext struct {
 	// — read by the cancelled reconcile branch to post a system feed comment
 	// and by Finish to publish run:cancelled with a structured reason_code.
 	CancelReason string
+	// RunType identifies a system-task run (e.g. "import"). When non-empty,
+	// the reconcile takes the system-task path: auto-complete (done/failed),
+	// no gates, no review, no retry. '' for normal worker runs.
+	RunType string
 }
 
 const maxAttempts = 3
@@ -279,12 +288,26 @@ func (s *GoalService) Create(ctx context.Context, g Goal) (*Goal, error) {
 	// it: attention derives only from changes/failed sub-goals). The run
 	// event is published after the commit (invariant 13).
 	var runEv *events.Event
+	var firstRunID string
 	if g.Status == "active" && (g.AssigneeType == "agent" || g.AssigneeType == "squad") {
-		_, ev, err := s.enqueueOwnerIntentTx(ctx, tx, g.ID, g.AssigneeType, g.AssigneeID, g.Status, "", "", "active")
+		r, ev, err := s.enqueueOwnerIntentTx(ctx, tx, g.ID, g.AssigneeType, g.AssigneeID, g.Status, "", "", "active")
 		if err != nil {
 			return nil, fmt.Errorf("enqueue first run: %w", err)
 		}
 		runEv = ev
+		if r != nil {
+			firstRunID = r.ID
+		}
+	}
+	// System-task goals: stamp run_type on the first run INSIDE this
+	// transaction. A post-commit UPDATE would race with Claim — the run
+	// could be claimed (and dispatched as a normal worker) before run_type
+	// is set, skipping the SystemTaskRegistry path entirely.
+	if firstRunID != "" && g.RunType != "" {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE run SET run_type=? WHERE id=?`, g.RunType, firstRunID); err != nil {
+			return nil, fmt.Errorf("stamp run_type=%s on first run: %w", g.RunType, err)
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
@@ -295,6 +318,184 @@ func (s *GoalService) Create(ctx context.Context, g Goal) (*Goal, error) {
 	}
 	s.bus.Publish(ctx, events.Event{Topic: "goal:created", Payload: g})
 	return &g, nil
+}
+
+// CreateSystemTaskGoal creates a goal assigned to a system agent (steward)
+// for executing a processor-style task with goal-plane visibility. Creates
+// a temporary scratch domain, an active goal (auto-enqueues the first run
+// via Create), and stamps run_type on the enqueued run so the daemon can
+// dispatch it through the SystemTaskRegistry.
+//
+// The goal auto-completes on run end (done/failed/cancelled — no gates, no
+// review, no retry). The caller is responsible for cleaning up old
+// system-task goals/domains before creating a new one of the same type.
+func (s *GoalService) CreateSystemTaskGoal(ctx context.Context, title, desc, assigneeID, taskType string) (*Goal, error) {
+	if title == "" {
+		return nil, NewFieldRequiredError("title")
+	}
+	if assigneeID == "" {
+		return nil, NewFieldRequiredError("assignee_id")
+	}
+	if taskType == "" {
+		return nil, NewFieldRequiredError("task_type")
+	}
+
+	// Create a temporary scratch domain. The name is a human-readable
+	// Chinese label for the task type + a short id suffix for uniqueness
+	// (domain.name is UNIQUE). The domain is deleted when the goal
+	// reaches a terminal state (reconcileSystemTaskRun).
+	domainID := newID()
+	short := domainID
+	if len(short) > 8 {
+		short = short[:8]
+	}
+	domainName := systemTaskDomainName(taskType, short)
+	if _, err := s.st.DB().ExecContext(ctx,
+		`INSERT INTO domain (id,type,name,git_url,default_branch,git_identity,git_credentials,policy_text,checks,verification_strength,max_run_duration,verify_timeout,processor_agent_id,checks_compiled_at,metrics_baseline,issue_repo,issue_assignee,issue_assignee_type,issue_provider,created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		domainID, "scratch", domainName, "", "main", "", "", "", "[]", "medium", 0, 600, "", "", "{}", "", "", "agent", "github", now()); err != nil {
+		return nil, fmt.Errorf("insert system-task domain: %w", err)
+	}
+
+	// Create the goal — Create() validates the assignee/domain and
+	// enqueues the first run in its own transaction. RunType is stamped
+	// on the run INSIDE that transaction (no post-commit race).
+	g, err := s.Create(ctx, Goal{
+		Title:         title,
+		Description:   desc,
+		DomainID:      domainID,
+		AssigneeType:  "agent",
+		AssigneeID:    assigneeID,
+		Status:        "active",
+		CreatedByType: "system",
+		RunType:       taskType,
+	})
+	if err != nil {
+		_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM domain WHERE id=?`, domainID)
+		return nil, err
+	}
+	return g, nil
+}
+
+// DeleteSystemTaskGoal deletes a terminal system-task goal and its
+// temporary domain. Called by system-task services (e.g. ImportTeam) to
+// clean up old imports before creating a new one. Safe to call on
+// already-deleted goals (no-op).
+func (s *GoalService) DeleteSystemTaskGoal(ctx context.Context, goalID string) {
+	var domainID string
+	_ = s.st.DB().QueryRowContext(ctx, `SELECT domain_id FROM goal WHERE id=?`, goalID).Scan(&domainID)
+	_ = s.Delete(ctx, goalID)
+	if domainID != "" {
+		_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM domain WHERE id=?`, domainID)
+	}
+}
+
+// reconcileSystemTaskRun is the dedicated reconcile for system-task goals
+// (run_type != ""). Auto-completes the goal: done on success, failed on
+// failure, cancelled on cancellation. No gates, no review, no retry — the
+// task is a data operation whose result was already ingested by the
+// handler's IngestArtifacts. The run's report lands in the feed (threaded
+// to the goal's root comment) so the timeline shows what happened.
+func (s *GoalService) reconcileSystemTaskRun(ctx context.Context, rc goalRunContext) error {
+	tx, err := s.st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var goalStatus, goalTitle string
+	err = tx.QueryRowContext(ctx,
+		`SELECT status, title FROM goal WHERE id=?`, rc.GoalID).
+		Scan(&goalStatus, &goalTitle)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil // goal vanished
+	}
+	if err != nil {
+		return fmt.Errorf("load system-task goal: %w", err)
+	}
+
+	// Map run status to goal status. System tasks have no retry — a
+	// failed or cancelled run is terminal for the goal.
+	finalStatus := rc.Status
+	switch rc.Status {
+	case "completed":
+		finalStatus = "done"
+	case "failed":
+		finalStatus = "failed"
+	case "cancelled":
+		finalStatus = "cancelled"
+	default:
+		finalStatus = "failed"
+	}
+
+	// Skip if the goal already reached this terminal state (idempotent —
+	// a replay should not re-stamp or double-comment).
+	if goalStatus == finalStatus || goalStatus == "done" || goalStatus == "failed" || goalStatus == "cancelled" {
+		return nil
+	}
+
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE goal SET status=? WHERE id=?`, finalStatus, rc.GoalID); err != nil {
+		return fmt.Errorf("update system-task goal status: %w", err)
+	}
+
+	// Post the run's report into the feed (completed → agent report;
+	// cancelled → system comment). Same threading as normal runs: the
+	// report replies to the goal's root comment (the creation mention).
+	if rc.Status == "completed" {
+		if _, err := insertRunResultComment(ctx, tx, rc); err != nil {
+			return fmt.Errorf("insert system-task report: %w", err)
+		}
+	} else if rc.Status == "cancelled" && rc.CancelReason != "" {
+		if _, err := insertCancelledRunComment(ctx, tx, rc); err != nil {
+			return fmt.Errorf("insert system-task cancel comment: %w", err)
+		}
+	}
+
+	// Activity log.
+	action := finalStatus
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO activity_log (id,goal_id,actor_type,actor_id,action,detail,created_at) VALUES (?,?,'system','',?,'{}',?)`,
+		newID(), rc.GoalID, action, now()); err != nil {
+		return fmt.Errorf("insert system-task activity: %w", err)
+	}
+
+	// Cancel any queued runs (the goal is terminal).
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE run SET status='cancelled', cancel_reason='goal_terminal' WHERE goal_id=? AND status='queued'`,
+		rc.GoalID); err != nil {
+		return fmt.Errorf("cancel queued system-task runs: %w", err)
+	}
+
+	// Stamp reconciled_at.
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE run SET reconciled_at=? WHERE id=?`, now(), rc.RunID); err != nil {
+		return fmt.Errorf("stamp reconciled_at: %w", err)
+	}
+
+	// Clean up the temporary scratch domain: the goal stays (its
+	// timeline shows the result), but the domain was a temporary
+	// container that should not clutter the project list. domain_id
+	// is cleared first (FK constraint), then the domain row is deleted.
+	var domainID sql.NullString
+	if err := tx.QueryRowContext(ctx, `SELECT domain_id FROM goal WHERE id=?`, rc.GoalID).Scan(&domainID); err == nil && domainID.Valid && domainID.String != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE goal SET domain_id=NULL WHERE id=?`, rc.GoalID); err != nil {
+			return fmt.Errorf("clear system-task domain_id: %w", err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM domain WHERE id=?`, domainID.String); err != nil {
+			return fmt.Errorf("delete system-task domain: %w", err)
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+
+	s.bus.Publish(ctx, events.Event{Topic: "goal:finished", Payload: map[string]any{
+		"goal_id": rc.GoalID, "status": finalStatus, "summary": rc.Summary,
+	}})
+	logging.Infof("system-task: goal %q → %s (run %s, type=%s)", goalTitle, finalStatus, rc.RunID, rc.RunType)
+	return nil
 }
 
 func (s *GoalService) List(ctx context.Context) ([]Goal, error) {
@@ -1081,6 +1282,14 @@ func (s *GoalService) reconcileOnRunEndOnce(ctx context.Context, rc goalRunConte
 	}
 	if rc.Role == "verify" {
 		return s.ReconcileVerifyRun(ctx, rc)
+	}
+
+	// System-task runs (run_type != "", e.g. "import") take a dedicated
+	// reconcile path: auto-complete (done/failed/cancelled), no gates, no
+	// review, no retry. The task is a data operation, not code work to be
+	// judged — the daemon's IngestArtifacts already processed the result.
+	if rc.RunType != "" {
+		return s.reconcileSystemTaskRun(ctx, rc)
 	}
 
 	tx, err := s.st.DB().BeginTx(ctx, nil)

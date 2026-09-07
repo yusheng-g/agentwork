@@ -905,9 +905,9 @@ func (s *RunService) ResolveRunToken(ctx context.Context, token string) (*RunIde
 func (s *RunService) loadRunContext(ctx context.Context, runID string) (goalRunContext, error) {
 	var rc goalRunContext
 	err := s.st.DB().QueryRowContext(ctx,
-		`SELECT id, goal_id, agent_id, is_leader_run, squad_id, status, attempt, result_summary, trigger_comment_id, role, sub_goal_id, base_ref, head_ref, session_id, cancel_reason
+		`SELECT id, goal_id, agent_id, is_leader_run, squad_id, status, attempt, result_summary, trigger_comment_id, role, sub_goal_id, base_ref, head_ref, session_id, cancel_reason, run_type
 		 FROM run WHERE id=?`, runID).
-		Scan(&rc.RunID, &rc.GoalID, &rc.AgentID, &rc.IsLeaderRun, &rc.SquadID, &rc.Status, &rc.Attempt, &rc.Summary, &rc.TriggerCommentID, &rc.Role, &rc.SubGoalID, &rc.BaseRef, &rc.HeadRef, &rc.SessionID, &rc.CancelReason)
+		Scan(&rc.RunID, &rc.GoalID, &rc.AgentID, &rc.IsLeaderRun, &rc.SquadID, &rc.Status, &rc.Attempt, &rc.Summary, &rc.TriggerCommentID, &rc.Role, &rc.SubGoalID, &rc.BaseRef, &rc.HeadRef, &rc.SessionID, &rc.CancelReason, &rc.RunType)
 	if err != nil {
 		return rc, err
 	}

@@ -927,9 +927,9 @@ func (d *Daemon) intakeSquadDelete(ctx context.Context, parsed intakeAction) str
 }
 
 // intakeImportTeam triggers a team-repo import from a git URL parsed out of
-// the owner's NL message. The import run is enqueued via TeamImportService —
-// the steward explores the repo and produces team.json in a separate
-// processor run (run_type="import"); this intake run merely starts it.
+// the owner's NL message. The import is executed as a system-task goal
+// assigned to the steward — the goal appears in the goal list with a
+// timeline, and auto-completes when the import finishes.
 func (d *Daemon) intakeImportTeam(ctx context.Context, parsed intakeAction) string {
 	it := parsed.ImportTeam
 	if strings.TrimSpace(it.GitURL) == "" {
@@ -938,7 +938,7 @@ func (d *Daemon) intakeImportTeam(ctx context.Context, parsed intakeAction) stri
 	if d.teamImportSvc == nil {
 		return "导入失败：team import 服务未接线"
 	}
-	ti, _, err := d.teamImportSvc.ImportTeam(ctx, service.ImportRequest{
+	_, goal, err := d.teamImportSvc.ImportTeam(ctx, service.ImportRequest{
 		GitURL:         it.GitURL,
 		DefaultBranch:  it.Branch,
 		GitCredentials: it.Credentials,
@@ -946,7 +946,7 @@ func (d *Daemon) intakeImportTeam(ctx context.Context, parsed intakeAction) stri
 	if err != nil {
 		return "导入失败：" + err.Error()
 	}
-	return fmt.Sprintf("✅ 团队导入已启动（%s），完成后会通知你", shortID(ti.ID))
+	return fmt.Sprintf("✅ 团队导入已启动，管家正在执行（任务 %s）", shortID(goal.ID))
 }
 
 // intakeListGoals answers "查看任务列表" with all goals (capped at 20 for IM

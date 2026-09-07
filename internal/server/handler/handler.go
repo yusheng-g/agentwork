@@ -640,7 +640,7 @@ func (h *Handlers) deleteSkill(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// ── team import (processor-run-driven) ──
+// ── team import (system-task-goal-driven) ──
 
 func (h *Handlers) importTeam(w http.ResponseWriter, r *http.Request) {
 	var req service.ImportRequest
@@ -655,12 +655,12 @@ func (h *Handlers) importTeam(w http.ResponseWriter, r *http.Request) {
 	if _, ok := h.testGitAndRespond(w, r, req.GitURL, req.GitCredentials, &req.DefaultBranch); !ok {
 		return
 	}
-	ti, run, err := h.TeamImport.ImportTeam(r.Context(), req)
+	ti, goal, err := h.TeamImport.ImportTeam(r.Context(), req)
 	if err != nil {
 		writeJSON(w, nil, err)
 		return
 	}
-	writeJSON(w, map[string]any{"team_import": ti, "run": run}, nil)
+	writeJSON(w, map[string]any{"team_import": ti, "goal": goal}, nil)
 }
 
 func (h *Handlers) getTeamImport(w http.ResponseWriter, r *http.Request) {

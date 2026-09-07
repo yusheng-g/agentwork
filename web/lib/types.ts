@@ -310,6 +310,7 @@ export interface LogLine {
 export interface TeamImport {
   id: string;
   run_id: string;
+  goal_id: string;
   git_url: string;
   git_credentials: string;
   default_branch: string;
@@ -320,7 +321,7 @@ export interface TeamImport {
 
 export interface TeamImportResponse {
   team_import: TeamImport;
-  run: Run;
+  goal: Goal;
 }
 
 // WS event shape from the hub: {"topic":"goal:created","payload":{...}}

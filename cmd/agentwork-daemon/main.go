@@ -108,7 +108,13 @@ func main() {
 
 	skillSvc := service.NewSkillService(st)
 	teamImportSvc := service.NewTeamImportService(st, bus)
-	teamImportSvc.SetDependencies(runSvc, agentSvc, skillSvc, squadSvc)
+	teamImportSvc.SetDependencies(runSvc, agentSvc, skillSvc, squadSvc, goalSvc)
+
+	// System-task registry: maps run_type strings to their handlers. The
+	// daemon dispatches and completes system-task goals generically through
+	// this registry (see SystemTaskHandler interface).
+	systemTasks := service.NewSystemTaskRegistry()
+	systemTasks.Register("import", teamImportSvc)
 
 	// M3 IM: the approval-card callbacks resolve through the goal layer; the
 	// owner's inbound messages become intake parse runs on the configured
@@ -131,6 +137,7 @@ func main() {
 	d.SetTeamImportService(teamImportSvc)
 	d.SetDomainService(domainSvc)
 	d.SetSkillService(skillSvc)
+	d.SetSystemTaskRegistry(systemTasks)
 	go func() {
 		if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logging.Errorf("daemon: %v", err)

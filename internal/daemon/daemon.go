@@ -143,9 +143,10 @@ type Daemon struct {
 	issueCloser   *issue.Closer              // M4-B: delivered goal → close its issue
 	intakeSvc     *notify.IntakeService      // M4-B: multi-domain clarification draft store
 	lastIssuePoll time.Time                  // last poll time (the interval is configurable)
-	teamImportSvc *service.TeamImportService // team-import processor run lifecycle
+	teamImportSvc *service.TeamImportService // team-import lifecycle (SystemTaskHandler for "import")
 	domainSvc     *service.DomainService     // intake: domain CRUD (NL-driven)
 	skillSvc      *service.SkillService      // intake: skill CRUD (NL-driven)
+	systemTasks   *service.SystemTaskRegistry // system-task goal dispatch + completion (run_type registry)
 
 	mu          sync.Mutex
 	workers     map[string]*agentWorker // agentID → per-agent scheduler
@@ -369,10 +370,15 @@ func New(st *store.Store, bus *events.Bus, addr string, protoReg *proto.Registry
 	return d
 }
 
-// SetTeamImportService wires the team-import processor-run lifecycle (called
-// after construction to avoid touching the already-long New signature).
+// SetTeamImportService wires the team-import service (called after
+// construction to avoid touching the already-long New signature).
 func (d *Daemon) SetTeamImportService(svc *service.TeamImportService) {
 	d.teamImportSvc = svc
+}
+
+// SetSystemTaskRegistry wires the system-task handler registry.
+func (d *Daemon) SetSystemTaskRegistry(r *service.SystemTaskRegistry) {
+	d.systemTasks = r
 }
 
 func (d *Daemon) SetDomainService(svc *service.DomainService) {
@@ -1691,13 +1697,13 @@ func (d *Daemon) runTask(ctx context.Context, q *service.ClaimedRow) {
 	}
 	var title, desc, handoff, domainID, gitURL, defaultBranch, domainType, domainName, systemPrompt, argsJSON, rtEnvJSON, sourceRef, gitCredentials, gitIdentity, runtimeMachineID string
 	var agentName, triggerAuthorName string
-	var triggerAuthor, triggerCommentID, triggerCommentContent, runRole, subGoalID, wakeNote, wakeAnchorID string
+	var triggerAuthor, triggerCommentID, triggerCommentContent, runRole, subGoalID, wakeNote, wakeAnchorID, runType string
 	var maxConcurrent, maxRunDuration int
 	err := d.st.DB().QueryRowContext(ctx,
 		`SELECT g.title, g.description, g.handoff_note, d.id, d.git_url, d.default_branch, COALESCE(d.type,''), COALESCE(d.name,''), a.system_prompt, a.name, d.git_identity,
 		        r.args, r.env, COALESCE(r.machine_id,''), a.max_concurrent, d.max_run_duration,
 		        g.source_ref, d.git_credentials,
-		        r2.trigger_comment_id, COALESCE(c.author_type, ''), COALESCE(c.content, ''), COALESCE(ca.name,''), r2.role, r2.sub_goal_id, r2.wake_note, COALESCE(r2.wake_anchor,'')
+		        r2.trigger_comment_id, COALESCE(c.author_type, ''), COALESCE(c.content, ''), COALESCE(ca.name,''), r2.role, r2.sub_goal_id, r2.wake_note, COALESCE(r2.wake_anchor,''), r2.run_type
 		 FROM run r2
 		 JOIN goal g ON g.id = r2.goal_id
 		 LEFT JOIN domain d ON d.id = g.domain_id
@@ -1706,7 +1712,7 @@ func (d *Daemon) runTask(ctx context.Context, q *service.ClaimedRow) {
 		 LEFT JOIN comment c ON c.id = r2.trigger_comment_id
 		 LEFT JOIN agent ca ON ca.id = c.author_id
 		 WHERE r2.id = ?`, q.RunID).
-		Scan(&title, &desc, &handoff, &domainID, &gitURL, &defaultBranch, &domainType, &domainName, &systemPrompt, &agentName, &gitIdentity, &argsJSON, &rtEnvJSON, &runtimeMachineID, &maxConcurrent, &maxRunDuration, &sourceRef, &gitCredentials, &triggerCommentID, &triggerAuthor, &triggerCommentContent, &triggerAuthorName, &runRole, &subGoalID, &wakeNote, &wakeAnchorID)
+		Scan(&title, &desc, &handoff, &domainID, &gitURL, &defaultBranch, &domainType, &domainName, &systemPrompt, &agentName, &gitIdentity, &argsJSON, &rtEnvJSON, &runtimeMachineID, &maxConcurrent, &maxRunDuration, &sourceRef, &gitCredentials, &triggerCommentID, &triggerAuthor, &triggerCommentContent, &triggerAuthorName, &runRole, &subGoalID, &wakeNote, &wakeAnchorID, &runType)
 	// Claim visibility: which run, which agent, which role — the panel's
 	// answer to "who is doing what right now". The TITLE travels with the
 	// id: ids are for the system, humans read titles.
@@ -1746,6 +1752,15 @@ func (d *Daemon) runTask(ctx context.Context, q *service.ClaimedRow) {
 	}
 
 	d.ensureWorker(q.AgentID, maxConcurrent)
+
+	// System-task runs (run_type != "", e.g. "import") take a dedicated
+	// dispatch path: proc dir + artifact files + handler-provided prompt
+	// and git config. No goal-branch worktree, no RunProfile, no session
+	// resume — the task produces artifacts, not code changes.
+	if runType != "" {
+		d.runSystemTaskGoal(ctx, q, runType, argsJSON, rtEnvJSON, runtimeMachineID)
+		return
+	}
 
 	// Working directory (决策 6-2): every run gets its OWN worktree under
 	// <runID> — the workspace. Owner runs check out the goal branch
@@ -1880,6 +1895,68 @@ func (d *Daemon) runTask(ctx context.Context, q *service.ClaimedRow) {
 	// machine over the /connect link. Legacy transports have no executor
 	// anymore — fail with a pointer instead of pretending to run.
 	d.failRun(ctx, q, "this runtime has no machine — run `agentwork connect` and point the agent at a machine-owned runtime")
+}
+
+// runSystemTaskGoal dispatches a system-task goal run (run_type != "") to
+// the machine. Unlike a normal worker run, it uses the proc dir (Proc=true)
+// with artifact files — the agent produces structured output, not code
+// changes. The handler provides the prompt, git config, and artifact file
+// list; the daemon assembles the dispatch params and sends them over the
+// link. No RunProfile (the task is not goal-contexted), no session resume.
+func (d *Daemon) runSystemTaskGoal(ctx context.Context, q *service.ClaimedRow, runType, argsJSON, rtEnvJSON, runtimeMachineID string) {
+	if d.systemTasks == nil {
+		d.failRun(ctx, q, "system task registry not wired")
+		return
+	}
+	handler, ok := d.systemTasks.Lookup(runType)
+	if !ok {
+		d.failRun(ctx, q, fmt.Sprintf("no system task handler registered for run_type=%q", runType))
+		return
+	}
+	prompt := handler.BuildPrompt(ctx, q.RunID)
+	artifactFiles := handler.ArtifactFiles()
+	gitURL, gitCredentials, defaultBranch, _ := handler.GitConfigForRun(ctx, q.RunID)
+
+	var args []string
+	_ = json.Unmarshal([]byte(argsJSON), &args)
+	var rtEnv map[string]string
+	_ = json.Unmarshal([]byte(rtEnvJSON), &rtEnv)
+	agentEnv, _ := d.loadAgentEnv(ctx, q.AgentID)
+	dispatchEnv := map[string]string{}
+	for k, v := range rtEnv {
+		dispatchEnv[k] = v
+	}
+	for k, v := range agentEnv {
+		dispatchEnv[k] = v
+	}
+
+	// Store the prompt on the run row (for inspection/debugging).
+	if _, err := d.st.DB().ExecContext(ctx,
+		`UPDATE run SET prompt=? WHERE id=?`, prompt, q.RunID); err != nil {
+		logging.Infof("daemon: system-task run %s: store prompt: %v", q.RunID, err)
+	}
+
+	if runtimeMachineID == "" {
+		d.failRun(ctx, q, "this runtime has no machine — run `agentwork connect` and point the agent at a machine-owned runtime")
+		return
+	}
+	d.dispatchToMachine(ctx, q, link.RunDispatchParams{
+		RunID:           q.RunID,
+		GoalID:          q.GoalID,
+		AgentID:         q.AgentID,
+		Attempt:         q.Attempt,
+		Token:           q.Token,
+		Prompt:          prompt,
+		Proc:            true,
+		ArtifactFiles:   artifactFiles,
+		DomainID:        "",
+		GitURL:          gitURL,
+		GitCredentials:  gitCredentials,
+		DefaultBranch:   defaultBranch,
+		ACPSpawn:        args,
+		Env:             dispatchEnv,
+		McpServers:      d.extraMcpServers(ctx, q.AgentID),
+	}, runtimeMachineID)
 }
 
 // runProcessorTask executes a platform-internal processor run: opens the

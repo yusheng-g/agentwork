@@ -25,6 +25,7 @@ import (
 type TeamImport struct {
 	ID              string `json:"id"`
 	RunID           string `json:"run_id"`
+	GoalID          string `json:"goal_id"`
 	GitURL          string `json:"git_url"`
 	GitCredentials  string `json:"git_credentials"`
 	DefaultBranch   string `json:"default_branch"`
@@ -64,15 +65,18 @@ type teamJSON struct {
 	} `json:"squad"`
 }
 
-// TeamImportService owns the team-import lifecycle: enqueueing the processor
-// run, and ingesting the agent's team.json artifact into agent/squad/skill rows.
+// TeamImportService owns the team-import lifecycle: creating a system-task
+// goal, ingesting the agent's team.json artifact into agent/squad/skill rows,
+// and publishing completion events. Implements SystemTaskHandler so the
+// daemon can dispatch and complete import runs generically.
 type TeamImportService struct {
-	st      *store.Store
-	bus     *events.Bus
-	runSvc  *RunService
+	st       *store.Store
+	bus      *events.Bus
+	runSvc   *RunService
 	agentSvc *AgentService
 	skillSvc *SkillService
 	squadSvc *SquadService
+	goalSvc  *GoalService
 }
 
 func NewTeamImportService(st *store.Store, bus *events.Bus) *TeamImportService {
@@ -81,11 +85,12 @@ func NewTeamImportService(st *store.Store, bus *events.Bus) *TeamImportService {
 
 // SetDependencies wires the back-references (circular constructor order —
 // same pattern as DomainService.SetRunService).
-func (s *TeamImportService) SetDependencies(runSvc *RunService, agentSvc *AgentService, skillSvc *SkillService, squadSvc *SquadService) {
+func (s *TeamImportService) SetDependencies(runSvc *RunService, agentSvc *AgentService, skillSvc *SkillService, squadSvc *SquadService, goalSvc *GoalService) {
 	s.runSvc = runSvc
 	s.agentSvc = agentSvc
 	s.skillSvc = skillSvc
 	s.squadSvc = squadSvc
+	s.goalSvc = goalSvc
 }
 
 // ImportRequest is the user's input for importing a team repo.
@@ -95,26 +100,28 @@ type ImportRequest struct {
 	DefaultBranch  string `json:"default_branch"`
 }
 
-// ImportTeam kicks off a team-import processor run:
+// ImportTeam kicks off a team-import as a system-task goal:
 //  1. Find the system-internal steward agent (type=steward); error if none.
 //  2. Ensure its runtime is active (reassign if needed); error if no active runtime.
 //  3. Gather active runtime names for the prompt (steward assigns each agent).
-//  4. Clean up old completed/failed rows (the table is temporary).
-//  5. Insert a team_import row with the git config (run_id still empty).
-//  6. Enqueue a processor run (run_type="import") using the team_import ID
-//     as the run's domain_id — the machine uses it as the bare-repo directory
-//     key (~/.agentwork/repos/<id>/). No domain (project) row is created.
-//  7. Back-fill the run_id onto the team_import row.
+//  4. Clean up old completed/failed imports (team_import rows + goals + domains).
+//  5. Insert a team_import row with the git config (goal_id/run_id still empty).
+//  6. Create a system-task goal (CreateSystemTaskGoal) — creates a temp scratch
+//     domain + an active goal assigned to the steward, auto-enqueuing the first
+//     run with run_type="import".
+//  7. Back-fill the goal_id and run_id onto the team_import row.
 //
-// Returns the team_import row and the processor run.
-func (s *TeamImportService) ImportTeam(ctx context.Context, req ImportRequest) (*TeamImport, *Run, error) {
+// Returns the team_import row and the goal.
+func (s *TeamImportService) ImportTeam(ctx context.Context, req ImportRequest) (*TeamImport, *Goal, error) {
+	if s.goalSvc == nil {
+		return nil, nil, errors.New("teamImportSvc dependencies not wired")
+	}
 	if strings.TrimSpace(req.GitURL) == "" {
 		return nil, nil, NewValidationError("git_url is required")
 	}
 
-	// The steward agent runs the exploration processor task. It is
-	// auto-seeded at daemon startup; if it's missing, the user hasn't
-	// connected a machine yet.
+	// The steward agent runs the exploration task. It is auto-seeded at
+	// daemon startup; if it's missing, the user hasn't connected a machine.
 	steward, err := s.agentSvc.GetSteward(ctx)
 	if err != nil {
 		return nil, nil, NewValidationError("steward agent does not exist — connect a machine and restart the daemon")
@@ -130,11 +137,9 @@ func (s *TeamImportService) ImportTeam(ctx context.Context, req ImportRequest) (
 		return nil, nil, NewValidationError("no active runtime available — connect a machine first")
 	}
 
-	// Clean up old completed/failed rows — the table is temporary tracking.
-	if _, err := s.st.DB().ExecContext(ctx,
-		`DELETE FROM team_import WHERE status IN ('completed','failed')`); err != nil {
-		return nil, nil, fmt.Errorf("cleanup old team_import rows: %w", err)
-	}
+	// Clean up old completed/failed imports: delete their goals + temp
+	// domains, then remove the team_import tracking rows.
+	s.cleanupOldImports(ctx)
 
 	branch := req.DefaultBranch
 	if branch == "" {
@@ -149,32 +154,66 @@ func (s *TeamImportService) ImportTeam(ctx context.Context, req ImportRequest) (
 		CreatedAt:      now(),
 	}
 	if _, err := s.st.DB().ExecContext(ctx,
-		`INSERT INTO team_import (id,run_id,git_url,git_credentials,default_branch,status,result,created_at) VALUES (?,?,?,?,?,?,?,?)`,
-		ti.ID, "", ti.GitURL, ti.GitCredentials, ti.DefaultBranch, ti.Status, ti.Result, ti.CreatedAt); err != nil {
+		`INSERT INTO team_import (id,run_id,goal_id,git_url,git_credentials,default_branch,status,result,created_at) VALUES (?,?,?,?,?,?,?,?,?)`,
+		ti.ID, "", "", ti.GitURL, ti.GitCredentials, ti.DefaultBranch, ti.Status, ti.Result, ti.CreatedAt); err != nil {
 		return nil, nil, fmt.Errorf("insert team_import: %w", err)
 	}
 
-	if s.runSvc == nil {
-		return nil, nil, errors.New("teamImportSvc.runSvc not wired")
-	}
-	prompt := importPrompt(runtimeNames)
-	// The team_import ID serves as the run's domain_id — the machine's
-	// ensureBareRepo uses it as the bare-repo directory key. No domain row
-	// exists; run.domain_id has no FK constraint.
-	run, err := s.runSvc.EnqueueProcessorRun(ctx, "import", ti.ID, steward.ID, prompt)
+	// Create a system-task goal: temp scratch domain + active goal assigned
+	// to the steward. Create() enqueues the first run; CreateSystemTaskGoal
+	// stamps run_type="import" on it.
+	title := SystemTaskGoalTitle("import", gitutil.SanitizeURL(req.GitURL))
+	desc := "导入团队仓库 " + gitutil.SanitizeURL(req.GitURL) + " 的 agent/skill/squad 定义"
+	goal, err := s.goalSvc.CreateSystemTaskGoal(ctx, title, desc, steward.ID, "import")
 	if err != nil {
 		_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM team_import WHERE id=?`, ti.ID)
-		return nil, nil, fmt.Errorf("enqueue import run: %w", err)
+		return nil, nil, fmt.Errorf("create import goal: %w", err)
 	}
 
+	// Back-fill goal_id and run_id onto the team_import row. The run may
+	// already be 'running' if Claim raced ahead — query by goal_id, not
+	// by status.
+	var runID string
+	_ = s.st.DB().QueryRowContext(ctx,
+		`SELECT id FROM run WHERE goal_id=? ORDER BY created_at DESC LIMIT 1`, goal.ID).Scan(&runID)
 	if _, err := s.st.DB().ExecContext(ctx,
-		`UPDATE team_import SET run_id=? WHERE id=?`, run.ID, ti.ID); err != nil {
-		return nil, nil, fmt.Errorf("backfill team_import run_id: %w", err)
+		`UPDATE team_import SET run_id=?, goal_id=? WHERE id=?`, runID, goal.ID, ti.ID); err != nil {
+		return nil, nil, fmt.Errorf("backfill team_import run_id/goal_id: %w", err)
 	}
-	ti.RunID = run.ID
+	ti.RunID = runID
+	ti.GoalID = goal.ID
 	s.bus.Publish(ctx, events.Event{Topic: "team:import_enqueued", Payload: ti})
-	logging.Infof("team-import: enqueued run %s for repo %s (steward=%s, runtimes=%v)", run.ID, sanitizeGitURL(req.GitURL), steward.ID, runtimeNames)
-	return ti, run, nil
+	logging.Infof("team-import: created goal %s, run %s for repo %s (steward=%s, runtimes=%v)", goal.ID, runID, gitutil.SanitizeURL(req.GitURL), steward.ID, runtimeNames)
+	return ti, goal, nil
+}
+
+// cleanupOldImports deletes terminal import goals and their temp domains,
+// then removes the team_import tracking rows. Called at the start of each
+// ImportTeam — the table is temporary tracking, and old import goals
+// (done/failed) are stale history that should not clutter the goal list.
+func (s *TeamImportService) cleanupOldImports(ctx context.Context) {
+	rows, err := s.st.DB().QueryContext(ctx,
+		`SELECT goal_id FROM team_import WHERE status IN ('completed','failed') AND goal_id != ''`)
+	if err != nil {
+		logging.Warnf("team-import: cleanup old imports: %v", err)
+		return
+	}
+	var goalIDs []string
+	for rows.Next() {
+		var gid string
+		_ = rows.Scan(&gid)
+		if gid != "" {
+			goalIDs = append(goalIDs, gid)
+		}
+	}
+	rows.Close()
+	for _, gid := range goalIDs {
+		s.goalSvc.DeleteSystemTaskGoal(ctx, gid)
+	}
+	if _, err := s.st.DB().ExecContext(ctx,
+		`DELETE FROM team_import WHERE status IN ('completed','failed')`); err != nil {
+		logging.Warnf("team-import: cleanup old team_import rows: %v", err)
+	}
 }
 
 // GitConfigForRun returns the git config stored on the team_import row for a
@@ -192,11 +231,11 @@ func (s *TeamImportService) GitConfigForRun(ctx context.Context, runID string) (
 	return gitURL, gitCredentials, defaultBranch, true
 }
 
-// importPrompt builds the instruction for the steward agent. The agent clones
+// ImportPrompt builds the instruction for the steward agent. The agent clones
 // the team repo (the platform handles the clone) and explores it with its file
 // tools, then writes team.json. runtimeNames is the list of active runtimes
 // the steward can assign to each imported agent.
-func importPrompt(runtimeNames []string) string {
+func ImportPrompt(runtimeNames []string) string {
 	var b strings.Builder
 	b.WriteString("You are the agentwork team-import processor. The current working directory is a team-definition repository.\n\n")
 	b.WriteString("Explore the repository, understand the team structure, and produce team.json in the current working directory (file is the result — do NOT output to stdout).\n\n")
@@ -250,40 +289,36 @@ func importPrompt(runtimeNames []string) string {
 }
 
 // IngestImport reads the agent's team.json artifact and upserts all entities.
-// Called by the daemon's ingestProcessorFinished when run_type=="import".
-func (s *TeamImportService) IngestImport(ctx context.Context, runID string, artifacts map[string]string, summary string) (*TeamImport, string, error) {
+// Called by the daemon's finishSystemTaskRun via IngestArtifacts.
+func (s *TeamImportService) IngestImport(ctx context.Context, runID string, artifacts map[string]string, summary string) (*TeamImport, *teamJSON, error) {
 	var ti TeamImport
 	err := s.st.DB().QueryRowContext(ctx,
-		`SELECT id, run_id, status FROM team_import WHERE run_id=?`, runID).
-		Scan(&ti.ID, &ti.RunID, &ti.Status)
+		`SELECT id, run_id, goal_id, status FROM team_import WHERE run_id=?`, runID).
+		Scan(&ti.ID, &ti.RunID, &ti.GoalID, &ti.Status)
 	if err != nil {
-		return nil, "", fmt.Errorf("team_import row for run %s: %w", runID, err)
+		return nil, nil, fmt.Errorf("team_import row for run %s: %w", runID, err)
 	}
 
 	var tj teamJSON
 	if err := s.parseTeamArtifact(ctx, artifacts, &ti, &tj); err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 
 	skillIDs, err := s.upsertSkills(ctx, &ti, tj.Skills)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	agentIDs, err := s.upsertAgents(ctx, &ti, tj.Agents, skillIDs)
 	if err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	if err := s.upsertSquad(ctx, &ti, tj.Squad, agentIDs); err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
 	if err := s.completeImport(ctx, &ti, &tj, summary); err != nil {
-		return nil, "", err
+		return nil, nil, err
 	}
-	squadName := ""
-	if tj.Squad != nil {
-		squadName = tj.Squad.Name
-	}
-	return &ti, squadName, nil
+	return &ti, &tj, nil
 }
 
 // parseTeamArtifact extracts and validates team.json from the artifact map.
@@ -405,11 +440,16 @@ func (s *TeamImportService) upsertSquad(ctx context.Context, ti *TeamImport, sq 
 
 // completeImport stamps the result and publishes the completion event.
 func (s *TeamImportService) completeImport(ctx context.Context, ti *TeamImport, tj *teamJSON, summary string) error {
+	squadName := ""
+	if tj.Squad != nil {
+		squadName = tj.Squad.Name
+	}
 	result, _ := json.Marshal(map[string]any{
-		"agents":    len(tj.Agents),
-		"skills":    len(tj.Skills),
-		"has_squad": tj.Squad != nil,
-		"summary":   summary,
+		"agents":     len(tj.Agents),
+		"skills":     len(tj.Skills),
+		"has_squad":  tj.Squad != nil,
+		"squad_name": squadName,
+		"summary":    summary,
 	})
 	if _, err := s.st.DB().ExecContext(ctx,
 		`UPDATE team_import SET status='completed', result=? WHERE id=?`, string(result), ti.ID); err != nil {
@@ -417,7 +457,7 @@ func (s *TeamImportService) completeImport(ctx context.Context, ti *TeamImport, 
 	}
 	ti.Result = string(result)
 	s.bus.Publish(ctx, events.Event{Topic: "team:imported", Payload: map[string]any{
-		"team_import_id": ti.ID, "run_id": ti.RunID,
+		"team_import_id": ti.ID, "run_id": ti.RunID, "goal_id": ti.GoalID,
 	}})
 	logging.Infof("team-import: run %s completed — %d agent(s), %d skill(s), squad=%v", ti.RunID, len(tj.Agents), len(tj.Skills), tj.Squad != nil)
 	return nil
@@ -440,8 +480,8 @@ func (s *TeamImportService) failImport(ctx context.Context, ti *TeamImport, reas
 func (s *TeamImportService) GetByRun(ctx context.Context, runID string) (*TeamImport, error) {
 	var ti TeamImport
 	err := s.st.DB().QueryRowContext(ctx,
-		`SELECT id, run_id, git_url, git_credentials, default_branch, status, result, created_at FROM team_import WHERE run_id=?`, runID).
-		Scan(&ti.ID, &ti.RunID, &ti.GitURL, &ti.GitCredentials, &ti.DefaultBranch, &ti.Status, &ti.Result, &ti.CreatedAt)
+		`SELECT id, run_id, goal_id, git_url, git_credentials, default_branch, status, result, created_at FROM team_import WHERE run_id=?`, runID).
+		Scan(&ti.ID, &ti.RunID, &ti.GoalID, &ti.GitURL, &ti.GitCredentials, &ti.DefaultBranch, &ti.Status, &ti.Result, &ti.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -457,7 +497,7 @@ func (s *TeamImportService) GetByRun(ctx context.Context, runID string) (*TeamIm
 // after a refresh.
 func (s *TeamImportService) ListActive(ctx context.Context) ([]TeamImport, error) {
 	rows, err := s.st.DB().QueryContext(ctx,
-		`SELECT id, run_id, git_url, git_credentials, default_branch, status, result, created_at FROM team_import WHERE status='pending' ORDER BY created_at DESC`)
+		`SELECT id, run_id, goal_id, git_url, git_credentials, default_branch, status, result, created_at FROM team_import WHERE status='pending' ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +505,7 @@ func (s *TeamImportService) ListActive(ctx context.Context) ([]TeamImport, error
 	var out []TeamImport
 	for rows.Next() {
 		var ti TeamImport
-		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.GitURL, &ti.GitCredentials, &ti.DefaultBranch, &ti.Status, &ti.Result, &ti.CreatedAt); err != nil {
+		if err := rows.Scan(&ti.ID, &ti.RunID, &ti.GoalID, &ti.GitURL, &ti.GitCredentials, &ti.DefaultBranch, &ti.Status, &ti.Result, &ti.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, ti)
@@ -473,7 +513,76 @@ func (s *TeamImportService) ListActive(ctx context.Context) ([]TeamImport, error
 	return out, rows.Err()
 }
 
-// sanitizeGitURL strips embedded credentials before logging.
-func sanitizeGitURL(raw string) string {
-	return gitutil.SanitizeURL(raw)
+// ── SystemTaskHandler implementation ──
+
+// ArtifactFiles returns the file the import agent must produce.
+func (s *TeamImportService) ArtifactFiles() []string {
+	return []string{"team.json"}
+}
+
+// BuildPrompt returns the exploration instruction for the steward. Called
+// at dispatch time by the daemon.
+func (s *TeamImportService) BuildPrompt(ctx context.Context, runID string) string {
+	runtimeNames, err := s.agentSvc.ListActiveRuntimeNames(ctx)
+	if err != nil || len(runtimeNames) == 0 {
+		runtimeNames = []string{"(none — connect a machine)"}
+	}
+	return ImportPrompt(runtimeNames)
+}
+
+// IngestArtifacts processes the agent's team.json and upserts all entities.
+// Returns a human-readable summary for the goal feed, or an error (the run
+// is marked failed).
+func (s *TeamImportService) IngestArtifacts(ctx context.Context, runID string, artifacts map[string]string, agentSummary string) (string, error) {
+	_, tj, err := s.IngestImport(ctx, runID, artifacts, agentSummary)
+	if err != nil {
+		return "", err
+	}
+	return formatImportSummary(tj), nil
+}
+
+func formatImportSummary(tj *teamJSON) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "✅ 团队导入完成：%d 个 agent、%d 个 skill", len(tj.Agents), len(tj.Skills))
+	if tj.Squad == nil {
+		return b.String()
+	}
+	b.WriteString("、1 个 squad")
+	sq := tj.Squad
+	fmt.Fprintf(&b, "\n\n**👥 %s**", sq.Name)
+	if sq.Description != "" {
+		fmt.Fprintf(&b, "\n\n**描述：** %s", firstLine(sq.Description))
+	}
+	fmt.Fprintf(&b, "\n\n**队长：** %s", sq.Leader)
+	if sq.Instructions != "" {
+		fmt.Fprintf(&b, "\n\n**协作规则：** %s", truncateStr(sq.Instructions, 200))
+	}
+	if len(sq.Members) > 0 {
+		b.WriteString("\n\n**成员：**")
+		for _, m := range sq.Members {
+			role := m.Role
+			if role == "" {
+				role = "成员"
+			}
+			fmt.Fprintf(&b, "  \n　- %s（%s）", m.Agent, role)
+		}
+	} else {
+		b.WriteString("\n\n**成员：** （无）")
+	}
+	return b.String()
+}
+
+func firstLine(s string) string {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return strings.TrimSpace(s[:i])
+	}
+	return strings.TrimSpace(s)
+}
+
+func truncateStr(s string, n int) string {
+	s = strings.TrimSpace(s)
+	if len(s) <= n {
+		return s
+	}
+	return s[:n] + "…"
 }
