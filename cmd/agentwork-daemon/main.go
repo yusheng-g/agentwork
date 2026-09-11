@@ -28,6 +28,7 @@ import (
 	"github.com/eushing/agentwork/internal/server"
 	"github.com/eushing/agentwork/internal/service"
 	"github.com/eushing/agentwork/internal/store"
+	"github.com/eushing/agentwork/internal/version"
 	"gopkg.in/natefinch/lumberjack.v2"
 )
 
@@ -38,7 +39,7 @@ func main() {
 	// Checked BEFORE flag.Parse: the flag package doesn't recognize the bare
 	// "version" positional, and would error out on it.
 	if len(os.Args) >= 2 && os.Args[1] == "version" {
-		fmt.Printf("v%s\n", daemon.DaemonVersion)
+		fmt.Printf("v%s\n", version.DaemonVersion)
 		return
 	}
 	addr := flag.String("addr", "127.0.0.1:7373", "HTTP listen address")

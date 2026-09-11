@@ -167,3 +167,32 @@ agentwork stats                 #   或设 AGENTWORK_SERVER_URL）
 | **传输** | stdio、WebSocket、TCP |
 | **通知** | 飞书（审批卡、日报、IM 入站） |
 | **Issue 触发** | GitHub、GitCode |
+
+## 遥测与隐私
+
+官方构建的二进制可能会将匿名的任务生命周期事件（创建 / 指派 / 完成 / 删除）
+上报到一个外部分析平台，以帮助我们了解使用情况、改进产品。
+
+**上报内容：** 事件类型、goal ID、goal 状态、daemon 版本号、时间戳。
+`anonymousId` / `distinctId` / `instance_id` 字段携带的是基于主机名派生的
+标识（若主机名本身是 32 位十六进制则直接使用，否则取其 MD5），从而把同一部署
+的事件关联起来。**不上报源码、提示词、模型输出、文件内容或验收策略。**
+
+**默认行为——禁用。** 上报端点和 AppID **不**硬编码在仓库里；一次普通的
+`go build` 或 `./build.sh` 会将它们留空，产出不发起任何 HTTP 请求的禁用二进制。
+只有通过 CI 流水线变量注入 `EVENT_POST_URL` / `EVENT_APP_ID`（以流水线变量形式
+存储，不进仓库）的构建才会产出会上报事件的二进制。
+
+**为自定义构建启用：**
+
+```bash
+EVENT_POST_URL="https://your-track-endpoint" \
+EVENT_APP_ID="your-app-id" \
+./build.sh
+```
+
+**显式关闭：**
+
+```bash
+EVENT_POST_URL="" ./build.sh
+```

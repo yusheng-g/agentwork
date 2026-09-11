@@ -25,6 +25,7 @@ import (
 	"github.com/eushing/agentwork/internal/server/ws"
 	"github.com/eushing/agentwork/internal/service"
 	"github.com/eushing/agentwork/internal/store"
+	"github.com/eushing/agentwork/internal/version"
 
 	"github.com/gorilla/websocket"
 )
@@ -227,11 +228,11 @@ func (s *Server) ListenAndServe(ctx context.Context, addr string) error {
 			registeredMachineID.Store(p.MachineID)
 			// Full skills sync (Phase 4): offline edits land on reconnect.
 			go s.d.PushMachineSkills(context.Background(), p.MachineID)
-			if p.Version != "" && p.Version != daemon.DaemonVersion {
-				logging.Infof("connect: machine %s CLI version %s differs from daemon %s — protocol drift possible", p.MachineID, p.Version, daemon.DaemonVersion)
+			if p.Version != "" && p.Version != version.DaemonVersion {
+				logging.Infof("connect: machine %s CLI version %s differs from daemon %s — protocol drift possible", p.MachineID, p.Version, version.DaemonVersion)
 			}
 			logging.Infof("connect: machine %q (%s) registered, %d agent CLI(s) probed", p.Name, p.Hostname, len(p.CLIs))
-			return link.RegisterResult{OK: true, ServerVersion: daemon.DaemonVersion}, nil
+			return link.RegisterResult{OK: true, ServerVersion: version.DaemonVersion}, nil
 		})
 		peer.Handle(link.MethodChatFrame, func(ctx context.Context, raw json.RawMessage) (any, *link.RPCError) {
 			var p link.ChatFrameParams
