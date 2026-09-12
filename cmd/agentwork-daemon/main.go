@@ -108,7 +108,7 @@ func main() {
 
 	skillSvc := service.NewSkillService(st)
 	teamImportSvc := service.NewTeamImportService(st, bus)
-	teamImportSvc.SetDependencies(runSvc, agentSvc, skillSvc, squadSvc)
+	teamImportSvc.SetDependencies(runSvc, goalSvc, domainSvc, agentSvc, skillSvc, squadSvc)
 
 	// Seed the built-in digest schedule (每日AI知识精选): fires daily at 09:00
 	// Asia/Shanghai on the steward (AI SHELL), collects AI news into

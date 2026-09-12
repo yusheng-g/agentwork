@@ -460,6 +460,39 @@ func (d *Daemon) finishMachineRun(ctx context.Context, p link.RunFinishedParams,
 			d.collectDigestBatch(ctx, gid, p.Artifacts)
 		}
 	}
+	// Import ingestion BEFORE Finish: the agent's team.json is upserted into
+	// agent/skill/squad rows + team_import completed (Path D — the import run
+	// is a worker run on a scratch domain, so processMachineRunCompletion
+	// below is a no-op for it; this block does the real ingestion). A failure
+	// flips the report to failed so Finish stamps the run failed (the
+	// team_import row is already marked failed by IngestImport → failImport).
+	importGoalID := ""
+	if gid := d.importGoalIDForRun(ctx, p.RunID); gid != "" {
+		importGoalID = gid
+		if p.Status == "completed" {
+			if d.teamImportSvc != nil {
+				ti, squadName, err := d.teamImportSvc.IngestImport(ctx, p.RunID, p.Artifacts, p.Summary)
+				if err != nil {
+					logging.Errorf("daemon: team import %s failed: %v", p.RunID, err)
+					p.Status = "failed"
+					p.Summary = err.Error()
+				} else {
+					d.notifyTeamImportComplete(ctx, ti, squadName)
+				}
+			} else {
+				logging.Warnf("daemon: import run %s finished but teamImportSvc is nil — artifacts dropped", p.RunID)
+			}
+		} else if p.Status == "failed" {
+			// Machine-reported failure: flip team_import to failed +
+			// publish team:import_failed (the worker path does not go
+			// through failProcessorRun's import self-routing).
+			if d.teamImportSvc != nil {
+				if err := d.teamImportSvc.FailImportByRun(ctx, p.RunID, p.Summary); err != nil {
+					logging.Errorf("daemon: fail import run %s: %v", p.RunID, err)
+				}
+			}
+		}
+	}
 	if p.Status == "completed" {
 		// The platform verifies (invariant 9 — the worker never verifies
 		// its own work): setup+verify+guards run on the adopted branch,
@@ -486,6 +519,13 @@ func (d *Daemon) finishMachineRun(ctx context.Context, p link.RunFinishedParams,
 	// (maybeFireReviewReady skips digest goals, no card ever fires).
 	if digestGoalID != "" && p.Status == "completed" {
 		d.approveDigestGoal(ctx, digestGoalID, p.RunID)
+	}
+	// Import auto-approval AFTER Finish: same scratch checkpoint, same
+	// auto-approve (maybeFireReviewReady skips import goals via
+	// isAutoApproveGoal). Only on a completed run — a failed run's goal
+	// reconcile parks it to failed, not review.
+	if importGoalID != "" && p.Status == "completed" {
+		d.approveImportGoal(ctx, importGoalID, p.RunID)
 	}
 }
 

@@ -1454,9 +1454,16 @@ func (s *GoalService) gatesForGoal(ctx context.Context, tx *sql.Tx, rc goalRunCo
 // run (” — its review panel shows the latest completed run); the IM
 // approval card carries the run id in the button value, so the decision
 // lands on exactly the run whose evidence the card displayed.
-func (s *GoalService) ResolveReview(ctx context.Context, goalID, runID, decision, reason string) (*Goal, error) {
+//
+// decidedBy is "human" (the Web/IM approval) or "system" (digest/import
+// auto-approve). It stamps gate_decision.decided_by AND the decision comment's
+// author_type — a system auto-approve must not masquerade as a human comment.
+func (s *GoalService) ResolveReview(ctx context.Context, goalID, runID, decision, reason, decidedBy string) (*Goal, error) {
 	if decision != "approve" && decision != "reject" && decision != "redirect" {
 		return nil, NewValidationError("decision must be approve, reject, or redirect")
+	}
+	if decidedBy == "" {
+		decidedBy = "human"
 	}
 	g, err := s.Get(ctx, goalID)
 	if err != nil {
@@ -1534,7 +1541,7 @@ func (s *GoalService) ResolveReview(ctx context.Context, goalID, runID, decision
 	}
 	if _, err := s.st.DB().ExecContext(ctx,
 		`INSERT INTO gate_decision (id,goal_id,run_id,gate_rule,decision,reason,decided_by,decided_at,review_duration) VALUES (?,?,?,?,?,?,?,?,?)`,
-		newID(), goalID, runID, rule, decision, reason, "human", ts, duration); err != nil {
+		newID(), goalID, runID, rule, decision, reason, decidedBy, ts, duration); err != nil {
 		return nil, fmt.Errorf("insert gate_decision: %w", err)
 	}
 	// The decision is what CLOSES the review wait (approve → deliver,
@@ -1544,7 +1551,7 @@ func (s *GoalService) ResolveReview(ctx context.Context, goalID, runID, decision
 	if reason != "" {
 		reasonSuffix = fmt.Sprintf(" (reason=%q)", trimLog(reason, 60))
 	}
-	logging.Infof("review: goal %q decision=%s by human%s", g.Title, decision, reasonSuffix)
+	logging.Infof("review: goal %q decision=%s by %s%s", g.Title, decision, decidedBy, reasonSuffix)
 	// The decision's reason is the human's words — the comment feed is where
 	// the agent's next run reads recent human comments, so the reject reason
 	// must be there (not only in gate_decision). 决策 7-2: reject/redirect
@@ -1565,7 +1572,7 @@ func (s *GoalService) ResolveReview(ctx context.Context, goalID, runID, decision
 		}
 		if _, err := s.st.DB().ExecContext(ctx,
 			`INSERT INTO comment (id,goal_id,author_type,author_id,parent_id,content,created_at) VALUES (?,?,?,'',NULL,?,?)`,
-			decisionCommentID, goalID, "human", content, ts); err != nil {
+			decisionCommentID, goalID, decidedBy, content, ts); err != nil {
 			return nil, fmt.Errorf("insert decision comment: %w", err)
 		}
 	}

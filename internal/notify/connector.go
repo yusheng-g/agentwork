@@ -642,7 +642,7 @@ func (c *Connector) onCardAction(ctx context.Context, event *callback.CardAction
 			Type: "error", Content: "平台未就绪（goalSvc 未接线）",
 		}}, nil
 	}
-	if _, err := c.goalSvc.ResolveReview(ctx, goalID, runID, decision, ""); err != nil {
+	if _, err := c.goalSvc.ResolveReview(ctx, goalID, runID, decision, "", "human"); err != nil {
 		// The validator's message is developer-oriented; the toast must be
 		// human-oriented (the most common case: a duplicate click while the
 		// async deliver runs — the card still shows buttons until the update

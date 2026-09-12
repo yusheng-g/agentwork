@@ -336,7 +336,7 @@ func TestReopenClearsStaleGateDecision(t *testing.T) {
 		`UPDATE goal SET status='review' WHERE id=?`, g.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gs.ResolveReview(ctx, g.ID, newRunID, "approve", ""); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, newRunID, "approve", "", "human"); err != nil {
 		t.Fatalf("new cycle approve after reopen: %v", err)
 	}
 	// And the new approve is now the only row, on the new evidence run.

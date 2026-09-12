@@ -427,6 +427,10 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// crash between Finish (articles collected) and the approve leaves them
 	// parked in review with no one to act. Sweep them closed at startup.
 	d.sweepStuckDigestGoals(ctx)
+	// Import goals are auto-approved the same way — sweep the same crash
+	// window (a crash between Finish and the approve leaves an import goal
+	// parked in review with its team.json already ingested).
+	d.sweepStuckImportGoals(ctx)
 	// Decision 2-9, trigger side: an approve followed by a crash leaves the
 	// goal in review with the approve recorded and no deliver — re-run the
 	// deliver (its merge/push idempotency makes the replay safe).
@@ -1885,6 +1889,27 @@ func (d *Daemon) runTask(ctx context.Context, q *service.ClaimedRow) {
 		if d.isDigestGoal(ctx, q.GoalID) {
 			artifactFiles = service.DigestArtifactFiles
 		}
+		// Import goals: the agent clones the import repo ITSELF (Path D). The
+		// git config (url/credentials/branch) is read from the team_import row
+		// (NOT the domain — the import domain is scratch, git-less) and passed
+		// via env so it never lands in the prompt text. team.json is the single
+		// artifact the agent uploads.
+		if d.isImportGoal(ctx, q.GoalID) {
+			artifactFiles = []string{"team.json"}
+			if d.teamImportSvc != nil {
+				if impGitURL, impCreds, impBranch, ok := d.teamImportSvc.GitConfigForRun(ctx, q.RunID); ok {
+					dispatchEnv["AGENTWORK_GIT_URL"] = impGitURL
+					if impCreds != "" {
+						dispatchEnv["AGENTWORK_GIT_CREDENTIALS"] = impCreds
+					}
+					if impBranch != "" {
+						dispatchEnv["AGENTWORK_DEFAULT_BRANCH"] = impBranch
+					}
+				} else {
+					logging.Warnf("daemon: import run %s has no team_import git config — agent clone will fail", q.RunID)
+				}
+			}
+		}
 		d.dispatchToMachine(ctx, q, link.RunDispatchParams{
 			RunID: q.RunID, GoalID: q.GoalID, AgentID: q.AgentID,
 			Role: runRole, SubGoalID: subGoalID, Attempt: q.Attempt,
@@ -2073,20 +2098,19 @@ func (d *Daemon) storeProcessorArtifacts(ctx context.Context, q *service.Claimed
 
 // failProcessorRun marks a processor run failed and notifies the frontend that
 // compilation did not complete (manual checks input remains the fallback).
+//
+// Import runs (run_type="import") are NOT compile runs — their failure must
+// update the team_import row and publish team:import_failed, not
+// domain:compile_failed. isImportRun routes them to failImportRun so every
+// failure site in runProcessorTask (load-config, no-machine, artifact-missing,
+// …) is covered without touching each caller.
 func (d *Daemon) failProcessorRun(ctx context.Context, q *service.ClaimedRow, summary string) {
-	logging.Infof("daemon: processor run %s failed: %s", q.RunID, summary)
-	// P0-5: the stamp is conditional — a run the runaway reaper already
-	// terminalized keeps the reaper's terminal state; this late failure is
-	// dropped (and must not broadcast a stale compile-failed event).
-	res, err := d.st.DB().ExecContext(ctx,
-		`UPDATE run SET status='failed', result_summary=?, finished_at=? WHERE id=? AND status='running'`,
-		summary, nowStr(), q.RunID)
-	if err != nil {
-		logging.Infof("daemon: mark processor run %s failed: %v", q.RunID, err)
+	if d.isImportRun(ctx, q.RunID) {
+		d.failImportRun(ctx, q, summary)
 		return
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		logging.Infof("daemon: processor run %s already terminal — dropping late failure", q.RunID)
+	logging.Infof("daemon: processor run %s failed: %s", q.RunID, summary)
+	if !d.stampRunFailed(ctx, q.RunID, summary) {
 		return
 	}
 	var domainID string
@@ -2094,6 +2118,54 @@ func (d *Daemon) failProcessorRun(ctx context.Context, q *service.ClaimedRow, su
 	d.bus.Publish(ctx, events.Event{Topic: "domain:compile_failed", Payload: map[string]any{
 		"run_id": q.RunID, "domain_id": domainID, "error": summary,
 	}})
+}
+
+// stampRunFailed conditionally marks a run failed: UPDATE run SET status='failed'
+// WHERE status='running'. Returns false (and drops the late failure) when the
+// run is already terminal — the runaway reaper or a prior failure stamped it.
+// Extracted from failProcessorRun so import and compile paths share the same
+// conditional stamp (P0-5: never overwrite a terminal state).
+func (d *Daemon) stampRunFailed(ctx context.Context, runID, summary string) bool {
+	res, err := d.st.DB().ExecContext(ctx,
+		`UPDATE run SET status='failed', result_summary=?, finished_at=? WHERE id=? AND status='running'`,
+		summary, nowStr(), runID)
+	if err != nil {
+		logging.Infof("daemon: mark processor run %s failed: %v", runID, err)
+		return false
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		logging.Infof("daemon: processor run %s already terminal — dropping late failure", runID)
+		return false
+	}
+	return true
+}
+
+// isImportRun reports whether a run is a team-import processor run. Used by
+// failProcessorRun to route import failures to failImportRun (update
+// team_import + team:import_failed) instead of the compile-failed path.
+func (d *Daemon) isImportRun(ctx context.Context, runID string) bool {
+	var runType string
+	if err := d.st.DB().QueryRowContext(ctx, `SELECT run_type FROM run WHERE id=?`, runID).Scan(&runType); err != nil {
+		return false
+	}
+	return runType == "import"
+}
+
+// failImportRun marks a team-import run failed: stamps the run row failed
+// (shared conditional stamp) and flips the team_import row to failed +
+// publishes team:import_failed. No-op on an already-terminal import.
+func (d *Daemon) failImportRun(ctx context.Context, q *service.ClaimedRow, summary string) {
+	logging.Infof("daemon: import run %s failed: %s", q.RunID, summary)
+	if !d.stampRunFailed(ctx, q.RunID, summary) {
+		return
+	}
+	if d.teamImportSvc != nil {
+		if err := d.teamImportSvc.FailImportByRun(ctx, q.RunID, summary); err != nil {
+			logging.Errorf("daemon: fail import run %s: %v", q.RunID, err)
+		}
+	} else {
+		logging.Warnf("daemon: import run %s failed but teamImportSvc is nil — team_import row not updated", q.RunID)
+	}
 }
 
 // priorSessionFor resolves the (session, workdir) a previous WRITABLE run
@@ -2340,9 +2412,20 @@ func (d *Daemon) loadAgentEnv(ctx context.Context, agentID string) (map[string]s
 
 // failRun records a launch-time failure (before any backend ran). Failed runs
 // still flow through Finish → reconcile so the goal layer can retry/fail the
-// goal authoritatively.
+// goal authoritatively. For import goals, the team_import row is also flipped
+// to failed + team:import_failed published (the worker path does not go
+// through failProcessorRun's import self-routing).
 func (d *Daemon) failRun(ctx context.Context, q *service.ClaimedRow, summary string) {
 	logging.Infof("daemon: run %s failed at launch: %s", q.RunID, summary)
+	// Import goal launch failures: update team_import + publish the import
+	// failure event. The run stamp + goal reconcile happen in finishRun below.
+	if q.GoalID != "" && d.isImportGoal(ctx, q.GoalID) {
+		if d.teamImportSvc != nil {
+			if err := d.teamImportSvc.FailImportByRun(ctx, q.RunID, summary); err != nil {
+				logging.Errorf("daemon: fail import run %s: %v", q.RunID, err)
+			}
+		}
+	}
 	d.finishRun(ctx, q, "failed", summary)
 }
 

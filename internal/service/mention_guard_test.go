@@ -126,7 +126,7 @@ func TestReviewDurationRecorded(t *testing.T) {
 		`UPDATE activity_log SET created_at=? WHERE goal_id=? AND action='entered_review'`, tenSecAgo, g.ID); err != nil {
 		t.Fatalf("backdate review entry: %v", err)
 	}
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "looks good"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "looks good", "human"); err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
 	var duration int

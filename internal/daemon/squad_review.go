@@ -112,10 +112,10 @@ func (d *Daemon) openReviewWindow(ctx context.Context, goalID string) {
 // (idle watchdog, per-domain max_run_duration reaper); its terminal event
 // closes the window. The fired flag makes the card exactly-once per window.
 func (d *Daemon) maybeFireReviewReady(ctx context.Context, goalID string) {
-	// Digest goals never reach a human: their checkpoint is auto-approved
-	// right after Finish — don't flash the card in the window before the
-	// approve lands.
-	if d.isDigestGoal(ctx, goalID) {
+	// Auto-approve goals (digest + team import) never reach a human: their
+	// checkpoint is auto-approved right after Finish — don't flash the card in
+	// the window before the approve lands.
+	if d.isAutoApproveGoal(ctx, goalID) {
 		return
 	}
 	var status, goalTitle string

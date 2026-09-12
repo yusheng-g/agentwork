@@ -25,7 +25,7 @@ func TestTimelineMergesRunsActionsAndDecisions(t *testing.T) {
 	}
 	run := enqueueFirst(t, rs, g)
 	finishWithMergeGate(t, st, rs, run, "ok")
-	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "approve", ""); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "approve", "", "human"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := gs.MarkDelivered(ctx, g.ID, true, "merged", nil); err != nil {
@@ -118,7 +118,7 @@ func TestTimelineRejectCarriesReviewDuration(t *testing.T) {
 		time.Now().UTC().Add(-5*time.Minute).Format(time.RFC3339Nano), g.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "reject", "方向不对"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "reject", "方向不对", "human"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 
