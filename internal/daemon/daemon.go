@@ -1962,12 +1962,10 @@ func (d *Daemon) runProcessorTask(ctx context.Context, q *service.ClaimedRow) {
 		return
 	}
 
-	// The team-import run is a repo-domain processor run (same clone +
-	// worktree path as compile); only the artifact file differs.
+	// Compile runs collect checks.json + strength.txt + metrics.json as
+	// artifacts (the only processor run type still using this path — import
+	// is now a worker run; intake is handled above).
 	artifactFiles := []string{"checks.json", "strength.txt", "metrics.json"}
-	if runType == "import" {
-		artifactFiles = []string{"team.json"}
-	}
 
 	var argsJSON, rtEnvJSON, procMachineID string
 	var maxConcurrent int
@@ -1985,22 +1983,12 @@ func (d *Daemon) runProcessorTask(ctx context.Context, q *service.ClaimedRow) {
 	// machine works the proc dir (repo compile: a detached worktree of
 	// origin/<default>) and uploads the artifact files with run.finished.
 	if procMachineID != "" {
-		// Git config source differs by run type: import runs read from the
-		// team_import tracking row (no domain/project is created); compile
-		// runs read from the domain row.
+		// Compile runs read git config from the domain row (the only processor
+		// run type reaching here — import is now a worker run).
 		var dType, gitURL, gitCredentials, defaultBranch string
-		if runType == "import" {
-			if d.teamImportSvc != nil {
-				gitURL, gitCredentials, defaultBranch, _ = d.teamImportSvc.GitConfigForRun(ctx, q.RunID)
-			}
-			if gitURL == "" {
-				logging.Warnf("daemon: import run %s has no git config — team_import row missing", q.RunID)
-			}
-		} else {
-			_ = d.st.DB().QueryRowContext(ctx,
-				`SELECT COALESCE(type,''), git_url, git_credentials, default_branch FROM domain WHERE id=?`, domainID).
-				Scan(&dType, &gitURL, &gitCredentials, &defaultBranch)
-		}
+		_ = d.st.DB().QueryRowContext(ctx,
+			`SELECT COALESCE(type,''), git_url, git_credentials, default_branch FROM domain WHERE id=?`, domainID).
+			Scan(&dType, &gitURL, &gitCredentials, &defaultBranch)
 		var args []string
 		_ = json.Unmarshal([]byte(argsJSON), &args)
 		var rtEnv map[string]string
@@ -2098,17 +2086,7 @@ func (d *Daemon) storeProcessorArtifacts(ctx context.Context, q *service.Claimed
 
 // failProcessorRun marks a processor run failed and notifies the frontend that
 // compilation did not complete (manual checks input remains the fallback).
-//
-// Import runs (run_type="import") are NOT compile runs — their failure must
-// update the team_import row and publish team:import_failed, not
-// domain:compile_failed. isImportRun routes them to failImportRun so every
-// failure site in runProcessorTask (load-config, no-machine, artifact-missing,
-// …) is covered without touching each caller.
 func (d *Daemon) failProcessorRun(ctx context.Context, q *service.ClaimedRow, summary string) {
-	if d.isImportRun(ctx, q.RunID) {
-		d.failImportRun(ctx, q, summary)
-		return
-	}
 	logging.Infof("daemon: processor run %s failed: %s", q.RunID, summary)
 	if !d.stampRunFailed(ctx, q.RunID, summary) {
 		return
@@ -2122,9 +2100,8 @@ func (d *Daemon) failProcessorRun(ctx context.Context, q *service.ClaimedRow, su
 
 // stampRunFailed conditionally marks a run failed: UPDATE run SET status='failed'
 // WHERE status='running'. Returns false (and drops the late failure) when the
-// run is already terminal — the runaway reaper or a prior failure stamped it.
-// Extracted from failProcessorRun so import and compile paths share the same
-// conditional stamp (P0-5: never overwrite a terminal state).
+// run is already terminal — the runaway reaper or a prior failure stamped it
+// (P0-5: never overwrite a terminal state).
 func (d *Daemon) stampRunFailed(ctx context.Context, runID, summary string) bool {
 	res, err := d.st.DB().ExecContext(ctx,
 		`UPDATE run SET status='failed', result_summary=?, finished_at=? WHERE id=? AND status='running'`,
@@ -2138,34 +2115,6 @@ func (d *Daemon) stampRunFailed(ctx context.Context, runID, summary string) bool
 		return false
 	}
 	return true
-}
-
-// isImportRun reports whether a run is a team-import processor run. Used by
-// failProcessorRun to route import failures to failImportRun (update
-// team_import + team:import_failed) instead of the compile-failed path.
-func (d *Daemon) isImportRun(ctx context.Context, runID string) bool {
-	var runType string
-	if err := d.st.DB().QueryRowContext(ctx, `SELECT run_type FROM run WHERE id=?`, runID).Scan(&runType); err != nil {
-		return false
-	}
-	return runType == "import"
-}
-
-// failImportRun marks a team-import run failed: stamps the run row failed
-// (shared conditional stamp) and flips the team_import row to failed +
-// publishes team:import_failed. No-op on an already-terminal import.
-func (d *Daemon) failImportRun(ctx context.Context, q *service.ClaimedRow, summary string) {
-	logging.Infof("daemon: import run %s failed: %s", q.RunID, summary)
-	if !d.stampRunFailed(ctx, q.RunID, summary) {
-		return
-	}
-	if d.teamImportSvc != nil {
-		if err := d.teamImportSvc.FailImportByRun(ctx, q.RunID, summary); err != nil {
-			logging.Errorf("daemon: fail import run %s: %v", q.RunID, err)
-		}
-	} else {
-		logging.Warnf("daemon: import run %s failed but teamImportSvc is nil — team_import row not updated", q.RunID)
-	}
 }
 
 // priorSessionFor resolves the (session, workdir) a previous WRITABLE run

@@ -223,6 +223,11 @@ func (s *TeamImportService) ImportTeam(ctx context.Context, req ImportRequest) (
 	var runID string
 	if err := s.st.DB().QueryRowContext(ctx,
 		`SELECT id FROM run WHERE goal_id=? AND role='owner' ORDER BY queued_at DESC LIMIT 1`, goal.ID).Scan(&runID); err != nil {
+		// Symmetric cleanup: the goal (and its enqueued run) were created in
+		// step 2 but the run lookup failed — delete the goal so it doesn't
+		// strand as an active system goal with no team_import tracking row,
+		// then delete the team_import row.
+		_ = s.goalSvc.Delete(ctx, goal.ID)
 		_, _ = s.st.DB().ExecContext(ctx, `DELETE FROM team_import WHERE id=?`, ti.ID)
 		return nil, nil, fmt.Errorf("locate import goal's first run: %w", err)
 	}
