@@ -198,7 +198,7 @@ func TestHandoffCycleWarnAndPark(t *testing.T) {
 	var approved bool
 	unsub := eventsBusTest(gs, "goal:approved", func() { approved = true })
 	defer unsub()
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "继续"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "继续", "human"); err != nil {
 		t.Fatalf("approve handoff loop: %v", err)
 	}
 	if approved {
@@ -210,7 +210,7 @@ func TestHandoffCycleWarnAndPark(t *testing.T) {
 	}
 	// 9th handoff parks again (≥8). Reject fails the goal.
 	handoff(b) // 9 — parks again
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "reject", "停"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "reject", "停", "human"); err != nil {
 		t.Fatalf("reject handoff loop: %v", err)
 	}
 	failed, _ := gs.Get(ctx, g.ID)

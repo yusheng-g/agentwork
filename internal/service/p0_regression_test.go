@@ -307,7 +307,7 @@ func TestHandoffLoopApproveReleasesIntent(t *testing.T) {
 		t.Fatalf("the intent must wait for the human decision, claimed %s", c.RunID)
 	}
 	// The human approves the loop — the goal releases and the intent claims.
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "继续"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "继续", "human"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	c, err := rs.Claim(ctx, []string{last})
@@ -432,7 +432,7 @@ func TestRejectSpawnsOwnerDespitePendingConsult(t *testing.T) {
 	}
 	// The human rejects — the owner's WORK run must be born, NOT merged
 	// into the pending consult.
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "reject", "方向调整一下"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "reject", "方向调整一下", "human"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 	var ownerRun string

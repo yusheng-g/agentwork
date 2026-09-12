@@ -1149,9 +1149,9 @@ func (d *Daemon) intakeSquadDelete(ctx context.Context, parsed intakeAction) int
 }
 
 // intakeImportTeam triggers a team-repo import from a git URL parsed out of
-// the owner's NL message. The import run is enqueued via TeamImportService —
-// the steward explores the repo and produces team.json in a separate
-// processor run (run_type="import"); this intake run merely starts it.
+// the owner's NL message. The import is enqueued via TeamImportService —
+// the steward explores the repo and produces team.json in a worker run backed
+// by an import goal (created_by_id='team_import'); this intake run merely starts it.
 func (d *Daemon) intakeImportTeam(ctx context.Context, parsed intakeAction) intakeResult {
 	it := parsed.ImportTeam
 	if strings.TrimSpace(it.GitURL) == "" {

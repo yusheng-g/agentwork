@@ -448,7 +448,7 @@ func (d *Daemon) pruneDigestScratchDir(ctx context.Context, goalID string) {
 func (d *Daemon) approveDigestGoal(ctx context.Context, goalID, runID string) {
 	var lastErr error
 	for i := 0; i < 5; i++ {
-		_, err := d.goalSvc.ResolveReview(ctx, goalID, runID, "approve", "内置任务自动验收")
+		_, err := d.goalSvc.ResolveReview(ctx, goalID, runID, "approve", "内置任务自动验收", "system")
 		if err == nil {
 			logging.Infof("digest: goal %s auto-approved", goalID)
 			return

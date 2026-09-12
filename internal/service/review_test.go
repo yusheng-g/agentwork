@@ -87,7 +87,7 @@ func TestReviewApproveKeepsGoalParkedUntilDeliver(t *testing.T) {
 	_ = r
 	finishWithMergeGate(t, st, rs, enqueueFirst(t, rs, g), "ok")
 
-	got, err := gs.ResolveReview(ctx, g.ID, "", "approve", "")
+	got, err := gs.ResolveReview(ctx, g.ID, "", "approve", "", "human")
 	if err != nil {
 		t.Fatalf("approve: %v", err)
 	}
@@ -134,7 +134,7 @@ func TestReviewRejectSendsBackWithReason(t *testing.T) {
 	g, _ := gs.Create(ctx, Goal{Title: "g", AssigneeType: "agent", AssigneeID: agentA, Status: "active", DomainID: domID})
 	finishWithMergeGate(t, st, rs, enqueueFirst(t, rs, g), "ok")
 
-	got, err := gs.ResolveReview(ctx, g.ID, "", "reject", "方向不对，把 X 改成 Y 再看")
+	got, err := gs.ResolveReview(ctx, g.ID, "", "reject", "方向不对，把 X 改成 Y 再看", "human")
 	if err != nil {
 		t.Fatalf("reject: %v", err)
 	}
@@ -197,7 +197,7 @@ func TestReviewRejectThenApproveRoundTrip(t *testing.T) {
 
 	g, _ := gs.Create(ctx, Goal{Title: "g", AssigneeType: "agent", AssigneeID: agentA, Status: "active", DomainID: domID})
 	finishWithMergeGate(t, st, rs, enqueueFirst(t, rs, g), "ok")
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "reject", "改一下"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "reject", "改一下", "human"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 	// Agent fixes; the new run completes → review again.
@@ -208,7 +208,7 @@ func TestReviewRejectThenApproveRoundTrip(t *testing.T) {
 	if g2.Status != "review" {
 		t.Fatalf("expected review again, got %q", g2.Status)
 	}
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", ""); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "", "human"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	done, err := gs.MarkDelivered(ctx, g.ID, true, "merged", nil)
@@ -236,7 +236,7 @@ func TestReviewRecordsRunID(t *testing.T) {
 	run := enqueueFirst(t, rs, g)
 	finishWithMergeGate(t, st, rs, run, "ok")
 
-	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "approve", ""); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "approve", "", "human"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	var recorded string
@@ -272,7 +272,7 @@ func TestReviewRecordsActualGateRule(t *testing.T) {
 	if err := rs.Finish(ctx, run.ID, "completed", "ok"); err != nil {
 		t.Fatalf("finish: %v", err)
 	}
-	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "approve", ""); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "approve", "", "human"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	var rule string
@@ -296,7 +296,7 @@ func TestMarkDeliveredFailureStaysInReview(t *testing.T) {
 
 	g, _ := gs.Create(ctx, Goal{Title: "g", AssigneeType: "agent", AssigneeID: agentA, Status: "active", DomainID: domID})
 	finishWithMergeGate(t, st, rs, enqueueFirst(t, rs, g), "ok")
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", ""); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "", "human"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	got, err := gs.MarkDelivered(ctx, g.ID, false, "合并冲突：internal/acp/client.go", nil)
@@ -353,7 +353,7 @@ func TestReviewMentionQueuesIntentAndReopen(t *testing.T) {
 	// comment with an action mention REOPENS the goal (comment-triggered
 	// reopen — "this task is not over") and the mention then triggers. A
 	// plain comment would land only.
-	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", ""); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, "", "approve", "", "human"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	if _, err := gs.MarkDelivered(ctx, g.ID, true, "merged", nil); err != nil {
@@ -397,11 +397,11 @@ func TestReviewRejectBlockedWhileDelivering(t *testing.T) {
 	g, _ := gs.Create(ctx, Goal{Title: "g", AssigneeType: "agent", AssigneeID: agentA, Status: "active", DomainID: domID})
 	run := enqueueFirst(t, rs, g)
 	finishWithMergeGate(t, st, rs, run, "ok")
-	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "approve", ""); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "approve", "", "human"); err != nil {
 		t.Fatalf("approve: %v", err)
 	}
 	// Reject while delivering → refused.
-	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "reject", "反悔了"); err == nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "reject", "反悔了", "human"); err == nil {
 		t.Fatal("reject during deliver must be refused")
 	}
 	// Deliver fails (conflict annotated) → reject becomes legal (the agent
@@ -410,7 +410,7 @@ func TestReviewRejectBlockedWhileDelivering(t *testing.T) {
 		`UPDATE goal SET review_request=? WHERE id=?`, "deliver: merge conflict in main.go", g.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "reject", "解决冲突"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "reject", "解决冲突", "human"); err != nil {
 		t.Fatalf("reject after deliver failure must be allowed: %v", err)
 	}
 }
@@ -428,7 +428,7 @@ func TestHumanWordsLandInCommentFeed(t *testing.T) {
 	g, _ := gs.Create(ctx, Goal{Title: "g", AssigneeType: "agent", AssigneeID: agentA, Status: "active", DomainID: domID})
 	run := enqueueFirst(t, rs, g)
 	finishWithMergeGate(t, st, rs, run, "ok")
-	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "reject", "方向不对，把 X 改成 Y"); err != nil {
+	if _, err := gs.ResolveReview(ctx, g.ID, run.ID, "reject", "方向不对，把 X 改成 Y", "human"); err != nil {
 		t.Fatalf("reject: %v", err)
 	}
 

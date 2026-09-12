@@ -35,6 +35,10 @@ var topics = []string{
 	"squad:created", "squad:deleted", "squad:member_added", "squad:member_removed",
 	"schedule:created", "schedule:fired",
 	"domain:created", "domain:deleted", "domain:compiled", "domain:compile_failed",
+	// team import lifecycle — published by TeamImportService (team_import.go)
+	// but were missing from this whitelist, so the frontend never received
+	// import completion/failure notifications.
+	"team:import_enqueued", "team:imported", "team:import_failed",
 }
 
 // Hub owns the set of active WS clients and fans out bus events to them.
