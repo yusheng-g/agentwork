@@ -392,3 +392,157 @@ func TestCollectDigestBatchBadManifestKeepsMetadatalessButNoManifestEntry(t *tes
 		t.Fatalf("md without H1 should have empty title: %+v", articles[1])
 	}
 }
+
+// catchUpFixture builds a Daemon with schedSvc wired (digestCatchUpOnStartup
+// calls schedSvc.FireNow) over a fresh store, seeds the marker + a schedule
+// row whose cron fires at 00:00 daily (so now.After(scheduledToday) is always
+// true — the test isolates the catch-up DECISION logic, not wall-clock timing).
+// nextRunAt is the schedule row's next_run_at (tomorrow = "already fired
+// today" / past-miss = "missed today").
+func catchUpFixture(t *testing.T, nextRunAt string) (*Daemon, *store.Store) {
+	t.Helper()
+	t.Setenv("HOME", t.TempDir())
+	st, err := store.Open(filepath.Join(t.TempDir(), "aw.db"))
+	if err != nil {
+		t.Fatalf("store.Open: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	bus := events.NewBus()
+	schedSvc := service.NewScheduleService(st, bus)
+	d := &Daemon{st: st, bus: bus, schedSvc: schedSvc}
+	if _, err := st.DB().Exec(
+		`INSERT INTO app_settings (key,value,updated_at) VALUES (?,?,'2026-01-01T00:00:00Z')`,
+		service.DigestKeySchedule, `"sched-1"`); err != nil {
+		t.Fatalf("set marker: %v", err)
+	}
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	// FK targets: agent + domain the schedule row references.
+	if _, err := st.DB().Exec(
+		`INSERT INTO machine (id,name,status,created_at) VALUES ('m-x','m-x','connected',?)`, ts); err != nil {
+		t.Fatalf("insert machine: %v", err)
+	}
+	if _, err := st.DB().Exec(
+		`INSERT INTO runtime (id,name,machine_id,args,env,status,created_at) VALUES ('rt-x','c@m-x','m-x','[]','{}','active',?)`, ts); err != nil {
+		t.Fatalf("insert runtime: %v", err)
+	}
+	if _, err := st.DB().Exec(
+		`INSERT INTO agent (id,name,type,runtime_id,created_at) VALUES ('a-steward','AI SHELL','steward','rt-x',?)`, ts); err != nil {
+		t.Fatalf("insert agent: %v", err)
+	}
+	if _, err := st.DB().Exec(
+		`INSERT INTO domain (id,type,name,created_at) VALUES ('dom-1','scratch','AI知识精选',?)`, ts); err != nil {
+		t.Fatalf("insert domain: %v", err)
+	}
+	if _, err := st.DB().Exec(
+		`INSERT INTO schedule (id,name,title_template,description,assignee_type,assignee_id,domain_id,cron_expression,timezone,enabled,next_run_at,last_run_at,created_at)
+		 VALUES ('sched-1','每日AI知识精选','t','d','agent','a-steward','dom-1','0 0 * * *','Asia/Shanghai',1,?,'',?)`,
+		nextRunAt, ts); err != nil {
+		t.Fatalf("insert schedule: %v", err)
+	}
+	return d, st
+}
+
+// catchUpNextRun reads the schedule row's next_run_at back for assertion.
+func catchUpNextRun(t *testing.T, st *store.Store) string {
+	t.Helper()
+	var v string
+	if err := st.DB().QueryRow(`SELECT next_run_at FROM schedule WHERE id='sched-1'`).Scan(&v); err != nil {
+		t.Fatalf("read next_run_at: %v", err)
+	}
+	return v
+}
+
+// TestDigestCatchUpFiresWhenMissedToday: next_run_at in the past (missed
+// today), no articles, no in-flight goal → FireNow stamps next_run_at to ~now.
+func TestDigestCatchUpFiresWhenMissedToday(t *testing.T) {
+	pastMiss := time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339Nano)
+	d, st := catchUpFixture(t, pastMiss)
+	before := catchUpNextRun(t, st)
+	d.digestCatchUpOnStartup(context.Background())
+	after := catchUpNextRun(t, st)
+	if after == before {
+		t.Fatalf("catch-up did not stamp next_run_at: before=%q after=%q (want ~now)", before, after)
+	}
+	// ~now: within a minute of now (FireNow stamps time.Now().UTC()).
+	if na, _ := time.Parse(time.RFC3339Nano, after); time.Since(na) > time.Minute {
+		t.Fatalf("stamped next_run_at %q is not ~now", after)
+	}
+}
+
+// TestDigestCatchUpSkipsWhenArticleAlreadyToday: today's article present →
+// do not fire (next_run_at untouched).
+func TestDigestCatchUpSkipsWhenArticleAlreadyToday(t *testing.T) {
+	tomorrow := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	d, st := catchUpFixture(t, tomorrow)
+	root := digestRoot()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	todayEntry := service.DigestArticle{
+		Title: "今日动态", Summary: "s", Path: filepath.Join(root, "1.md"),
+		CreateTime: time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	b, _ := json.Marshal([]service.DigestArticle{todayEntry})
+	if err := os.WriteFile(filepath.Join(root, "articles.json"), b, 0o644); err != nil {
+		t.Fatalf("write articles.json: %v", err)
+	}
+	before := catchUpNextRun(t, st)
+	d.digestCatchUpOnStartup(context.Background())
+	if after := catchUpNextRun(t, st); after != before {
+		t.Fatalf("catch-up fired despite today's article: before=%q after=%q", before, after)
+	}
+}
+
+// TestDigestCatchUpSkipsWhenInflightGoal: an active digest goal → do not fire.
+func TestDigestCatchUpSkipsWhenInflightGoal(t *testing.T) {
+	tomorrow := time.Now().Add(24 * time.Hour).UTC().Format(time.RFC3339Nano)
+	d, st := catchUpFixture(t, tomorrow)
+	// catchUpFixture already planted agent a-steward; just add an active goal
+	// created by the digest schedule (in-flight).
+	ts := time.Now().UTC().Format(time.RFC3339)
+	if _, err := st.DB().Exec(
+		`INSERT INTO goal (id,title,domain_id,assignee_type,assignee_id,status,created_by_type,created_by_id,created_at)
+		 VALUES ('g-inflight','d','dom-1','agent','a-steward','active','system','sched-1',?)`, ts); err != nil {
+		t.Fatalf("insert inflight goal: %v", err)
+	}
+	before := catchUpNextRun(t, st)
+	d.digestCatchUpOnStartup(context.Background())
+	if after := catchUpNextRun(t, st); after != before {
+		t.Fatalf("catch-up fired despite inflight goal: before=%q after=%q", before, after)
+	}
+}
+
+// TestDigestCatchUpSkipsWhenNotYetDue: scheduledToday is in the future → the
+// normal tick should fire it; catch-up must not pre-fire. Uses a cron 23h59m
+// ahead by setting hour far in the future relative to now.
+func TestDigestCatchUpSkipsWhenNotYetDue(t *testing.T) {
+	// Cron at 23:59 daily: if now is before 23:59, scheduledToday is today
+	// 23:59 (future). If now is after 23:59, scheduledToday is tomorrow 23:59
+	// (future). Either way not-yet-due when next_run_at is that future moment.
+	futureNextRun := time.Now().Add(2 * time.Hour).UTC().Format(time.RFC3339Nano)
+	d, st := catchUpFixture(t, futureNextRun)
+	// Rewrite cron to 23:59 to guarantee scheduledToday is in the future
+	// regardless of when the test runs.
+	if _, err := st.DB().Exec(`UPDATE schedule SET cron_expression='59 23 * * *' WHERE id='sched-1'`); err != nil {
+		t.Fatalf("update cron: %v", err)
+	}
+	before := catchUpNextRun(t, st)
+	d.digestCatchUpOnStartup(context.Background())
+	if after := catchUpNextRun(t, st); after != before {
+		t.Fatalf("catch-up fired before today's planned moment: before=%q after=%q", before, after)
+	}
+}
+
+// TestDigestCatchUpSkipsWhenDisabled: enabled=0 → respect user's disable.
+func TestDigestCatchUpSkipsWhenDisabled(t *testing.T) {
+	pastMiss := time.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339Nano)
+	d, st := catchUpFixture(t, pastMiss)
+	if _, err := st.DB().Exec(`UPDATE schedule SET enabled=0 WHERE id='sched-1'`); err != nil {
+		t.Fatalf("disable: %v", err)
+	}
+	before := catchUpNextRun(t, st)
+	d.digestCatchUpOnStartup(context.Background())
+	if after := catchUpNextRun(t, st); after != before {
+		t.Fatalf("catch-up fired despite disabled schedule: before=%q after=%q", before, after)
+	}
+}

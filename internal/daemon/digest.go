@@ -512,3 +512,124 @@ func (d *Daemon) sweepStuckDigestGoals(ctx context.Context) {
 	}
 	logging.Infof("digest: swept %d stuck review goal(s)", len(ids))
 }
+
+// digestCatchUpOnStartup fires the daily digest once when the machine (which
+// is not on 24/7) boots after missing today's planned fire moment and no
+// articles were collected today. This closes the "powered off across the fire
+// window → dispatchSchedules skips it as a miss → the day silently produces
+// nothing" gap. The fire is the SAME mechanism first-seeding uses (FireNow
+// stamps next_run_at=now; the 5s schedule tick then runs fireSchedule, which
+// advances next_run_at back to tomorrow on its own). Idempotent across
+// restarts within a day: once today's articles land, condition 5 blocks the
+// next restart from firing again.
+func (d *Daemon) digestCatchUpOnStartup(ctx context.Context) {
+	schedID := d.digestScheduleID(ctx)
+	if schedID == "" {
+		return
+	}
+	var cronExpr, tz, nextRunAt string
+	var enabled int
+	if err := d.st.DB().QueryRowContext(ctx,
+		`SELECT cron_expression, timezone, next_run_at, enabled FROM schedule WHERE id=?`,
+		schedID).Scan(&cronExpr, &tz, &nextRunAt, &enabled); err != nil {
+		logging.Infof("digest catch-up: read schedule %s: %v", schedID, err)
+		return
+	}
+	if enabled == 0 {
+		return // user disabled — respect it
+	}
+	if tz == "" {
+		tz = "UTC"
+	}
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		logging.Infof("digest catch-up: timezone %q: %v", tz, err)
+		return
+	}
+	now := time.Now().In(loc)
+	// Today's planned moment is derived from the cron_expression (which carries
+	// the per-instance random minute rolled at first seed). ComputeNextRun is
+	// strictly-AFTER its anchor, so anchor at one second before today's 00:00 —
+	// the next cron hit after that is today's 07:XX (not tomorrow's). Stable
+	// regardless of whether today already fired.
+	startOfToday := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+	scheduledToday, err := service.ComputeNextRun(cronExpr, tz, startOfToday.Add(-time.Second))
+	if err != nil {
+		logging.Infof("digest catch-up: compute today's moment: %v", err)
+		return
+	}
+	if !now.After(scheduledToday) {
+		return // not yet due today — let the normal tick fire at the planned moment
+	}
+	// The schedule_fireTTL/miss-grace window: if SeedDigestSchedule.FireNow
+	// just stamped next_run_at to now (first-seed path), a duplicate fire here
+	// would race it. Skip while next_run_at sits inside now±1min.
+	if nextRunAt != "" {
+		if nr, perr := time.Parse(time.RFC3339Nano, nextRunAt); perr == nil {
+			if diff := time.Since(nr); diff < time.Minute && diff > -time.Minute {
+				return
+			}
+		}
+	}
+	// Today's articles: the latest articles.json entry whose createTime falls
+	// on today (in the schedule timezone) means the day already produced —
+	// skip. A fire that produced no articles (agent failed / no executor) does
+	// NOT write a today entry, so this stays satisfiable and the catch-up
+	// retries on the next restart.
+	if d.digestHasTodayArticle(ctx, loc, now) {
+		return
+	}
+	// In-flight digest goal: a fired run still executing means today's work is
+	// not done but is in progress — a second fire would clone a parallel goal.
+	// Wait for the in-flight one to finish (it then either writes today's
+	// article → condition above blocks, or fails → next restart retries).
+	if d.digestHasInflightGoal(ctx, schedID) {
+		return
+	}
+	if err := d.schedSvc.FireNow(ctx, schedID); err != nil {
+		logging.Warnf("digest catch-up: fire-now %s: %v", schedID, err)
+		return
+	}
+	logging.Infof("digest catch-up: machine missed today's %s window — firing now (next_run_at stamped to now; schedule tick will dispatch)",
+		scheduledToday.Format("15:04 MST"))
+}
+
+// digestHasTodayArticle reports whether articles.json's newest entry was
+// collected today (schedule timezone). The createTime is stamped by
+// collectDigestBatch at write time in UTC RFC3339Nano; a missing/empty file
+// means no batch yet → false.
+func (d *Daemon) digestHasTodayArticle(ctx context.Context, loc *time.Location, now time.Time) bool {
+	articles, err := readDigestArticles(digestRoot())
+	if err != nil || len(articles) == 0 {
+		return false
+	}
+	today := now.Format("2006-01-02")
+	// Newest-first ordering is maintained by collectDigestBatch's prepend; the
+	// first entry is the most recent. A today-dated newest entry ⟺ today has
+	// produced. (Older today entries behind a non-today newest cannot happen —
+	// prepend keeps today ahead of any older day.)
+	for _, a := range articles {
+		if a.CreateTime == "" {
+			continue
+		}
+		t, perr := time.Parse(time.RFC3339Nano, a.CreateTime)
+		if perr != nil {
+			continue
+		}
+		return t.In(loc).Format("2006-01-02") == today
+	}
+	return false
+}
+
+// digestHasInflightGoal reports whether any digest goal is still executing
+// today (status active or review). review is included because the auto-approve
+// is async to Finish — a review-parked goal is still "today's run in flight"
+// until approveDigestGoal closes it.
+func (d *Daemon) digestHasInflightGoal(ctx context.Context, schedID string) bool {
+	var n int
+	_ = d.st.DB().QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM goal
+		 WHERE created_by_type='system' AND created_by_id=?
+		   AND status IN ('active','review')`, schedID).Scan(&n)
+	return n > 0
+}

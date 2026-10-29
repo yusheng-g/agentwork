@@ -1,18 +1,22 @@
 package service
 
 // The built-in "每日AI知识精选" digest schedule: seeded at daemon startup,
-// fires daily at 09:00 (Asia/Shanghai), and collects fresh AI-community news
-// into md articles plus an articles.json index (the machine uploads them via
-// run.finished artifacts; the daemon writes ~/.agentwork/digest/). Seeding is
-// idempotent and self-healing: the marker lives in app_settings so the
-// schedule can be recognized (built_in flag / edit-delete guards) across
-// restarts, and dangling markers rebuild the row.
+// fires daily within 07:00–07:59 (Asia/Shanghai, minute randomized per
+// instance), and collects fresh AI-community news into md articles plus an
+// articles.json index (the machine uploads them via run.finished artifacts;
+// the daemon writes ~/.agentwork/digest/). The per-instance random minute
+// spreads concurrent deployments across the hour so token-gateway rate limits
+// are not hit all at once. Seeding is idempotent and self-healing: the marker
+// lives in app_settings so the schedule can be recognized (built_in flag /
+// edit-delete guards) across restarts, and dangling markers rebuild the row —
+// the random minute is picked once at first create and never changed after.
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 
 	"github.com/eushing/agentwork/internal/logging"
@@ -25,7 +29,8 @@ const (
 	// directory IS the deliverable — exactly what a doc-producing task needs.
 	digestDomainName   = "AI知识精选"
 	digestScheduleName = "每日AI知识精选"
-	digestCron         = "0 9 * * *" // daily at 09:00
+	digestHour         = 7 // daily fire hour; minute randomized per instance
+	digestDefaultCron  = "0 7 * * *" // fallback if random generation fails
 	digestTimezone     = "Asia/Shanghai"
 	digestTitleTpl     = "每日 AI 知识精选（自动收集）"
 	// app_settings marker keys — the builtin.* prefix keeps them clear of
@@ -41,6 +46,25 @@ const (
 const (
 	DigestKeySchedule = digestKeySchedule
 )
+
+// digestRandomCron picks a per-instance minute within the 07:00–07:59 window.
+// Spreading deployments across the hour avoids every instance hitting the
+// token gateway at the same instant. Called once at first create; the random
+// minute is then persisted in the schedule row and never re-rolled. Falls
+// back to digestDefaultCron ("0 7 * * *") if random generation fails.
+func digestRandomCron() (cron string) {
+	defer func() {
+		if r := recover(); r != nil {
+			logging.Warnf("seed digest: random cron panicked (%v) — falling back to %s", r, digestDefaultCron)
+			cron = digestDefaultCron
+		}
+	}()
+	cron = fmt.Sprintf("%d %d * * *", rand.IntN(60), digestHour)
+	if cron == "" {
+		return digestDefaultCron
+	}
+	return cron
+}
 
 // DigestArtifactFiles are the goal-directory files uploaded with
 // run.finished. Fixed names — the executor's prompt mandates them.
@@ -176,7 +200,7 @@ func SeedDigestSchedule(ctx context.Context, st *store.Store, agentSvc *AgentSer
 		AssigneeType:   "agent",
 		AssigneeID:     steward.ID,
 		DomainID:       domain.ID,
-		CronExpression: digestCron,
+		CronExpression: digestRandomCron(),
 		Timezone:       digestTimezone,
 	})
 	if err != nil {
@@ -196,7 +220,7 @@ func SeedDigestSchedule(ctx context.Context, st *store.Store, agentSvc *AgentSer
 		// Best-effort: the schedule still fires at its first cron boundary.
 		logging.Warnf("seed digest: fire-now %s: %v", sch.ID, err)
 	}
-	logging.Infof("seed digest: schedule %q created (%s, cron %s %s) — first run dispatched now", digestScheduleName, sch.ID, digestCron, digestTimezone)
+	logging.Infof("seed digest: schedule %q created (%s, cron %s %s) — first run dispatched now", digestScheduleName, sch.ID, sch.CronExpression, digestTimezone)
 	return nil
 }
 

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -69,8 +70,11 @@ func TestSeedDigestScheduleCreatesAndIsIdempotent(t *testing.T) {
 	if sch.Name != digestScheduleName || !sch.BuiltIn {
 		t.Fatalf("schedule = %+v, want built-in %q", sch, digestScheduleName)
 	}
-	if sch.CronExpression != digestCron || sch.Timezone != digestTimezone {
-		t.Fatalf("cron/tz = %s/%s, want %s/%s", sch.CronExpression, sch.Timezone, digestCron, digestTimezone)
+	if sch.CronExpression == "" || sch.Timezone != digestTimezone {
+		t.Fatalf("cron/tz = %s/%s, want non-empty cron and %s", sch.CronExpression, sch.Timezone, digestTimezone)
+	}
+	if m, ok := parseDigestCronMinute(t, sch.CronExpression); !ok || m < 0 || m > 59 {
+		t.Fatalf("cron %q: want minute 0–59 in hour %d", sch.CronExpression, digestHour)
 	}
 	// 首次创建即先跑一次: the fresh schedule's next_run_at was stamped to
 	// "now" (FireNow) so the daemon's tick fires it within seconds — the
@@ -240,4 +244,19 @@ func TestBuiltInGuardsBlockUpdateAndDelete(t *testing.T) {
 	if err := schedSvc.Delete(context.Background(), other.ID); err != nil {
 		t.Fatalf("user schedule delete blocked: %v", err)
 	}
+}
+
+// parseDigestCronMinute extracts the minute field from a seeded digest cron
+// expression ("M H * * *") and checks the hour matches digestHour. Used to
+// assert the per-instance random minute stays in the 07:00–07:59 window.
+func parseDigestCronMinute(t *testing.T, cron string) (int, bool) {
+	t.Helper()
+	var min, hour int
+	if _, err := fmt.Sscanf(cron, "%d %d * * *", &min, &hour); err != nil {
+		return 0, false
+	}
+	if hour != digestHour {
+		t.Fatalf("cron %q hour = %d, want %d", cron, hour, digestHour)
+	}
+	return min, true
 }

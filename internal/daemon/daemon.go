@@ -427,6 +427,11 @@ func (d *Daemon) Run(ctx context.Context) error {
 	// crash between Finish (articles collected) and the approve leaves them
 	// parked in review with no one to act. Sweep them closed at startup.
 	d.sweepStuckDigestGoals(ctx)
+	// The host machine is not on 24/7: a boot after missing today's planned
+	// fire moment would otherwise leave the day with no digest (the miss is
+	// skipped, not replayed). Catch up once when articles are still missing
+	// for today — same FireNow mechanism first-seeding uses.
+	d.digestCatchUpOnStartup(ctx)
 	// Import goals are auto-approved the same way — sweep the same crash
 	// window (a crash between Finish and the approve leaves an import goal
 	// parked in review with its team.json already ingested).
