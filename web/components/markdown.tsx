@@ -60,8 +60,12 @@ export function Markdown({
           ol: ({ children }) => <ol className="list-decimal pl-5 my-1.5 space-y-0.5">{children}</ol>,
           li: ({ children }) => <li>{children}</li>,
           code: ({ className, children }) => {
-            // Inline code (no language class) vs block (rendered by pre).
-            const isBlock = className?.includes("language-");
+            // Inline code vs block (rendered by pre)。无语言标注的围栏块没有
+            // language- class，仅靠 class 判断会把它误判成行内代码——深色
+            // pre 里嵌一条浅色 chip。补一个换行内容检测兜底。
+            const isBlock =
+              className?.includes("language-") ||
+              String(children ?? "").includes("\n");
             if (isBlock) {
               return <code className={className}>{children}</code>;
             }

@@ -276,8 +276,10 @@ function updateToEvent(u: any): ChatEvent | null {
     }
     case "tool_call_update": {
       const st = u.status ?? "";
-      if (st !== "completed") return null;
-      const out = typeof u.rawOutput === "string" ? u.rawOutput : JSON.stringify(u.rawOutput ?? "");
+      // failed 也是终态——丢弃会让工具卡永远停在「运行中…」。
+      if (st !== "completed" && st !== "failed") return null;
+      const raw = typeof u.rawOutput === "string" ? u.rawOutput : JSON.stringify(u.rawOutput ?? "");
+      const out = st === "failed" ? `（失败）${raw}` : raw;
       return { kind: "tool", text: "", callId: u.toolCallId, output: out, isResult: true };
     }
     default:

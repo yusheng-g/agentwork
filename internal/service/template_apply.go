@@ -237,6 +237,13 @@ type TemplateApplyService struct {
 	gitTester  GitTester
 	repoProv   gitcodeapi.RepoProvider
 	pushSkills func(agentID string) // ships persona+skills to the machine (the daemon's PushAgentSkills); nil in tests
+	// pushSkillUpdate re-pushes one skill's CURRENT archive to every agent
+	// that has it selected (the daemon's PushSkillUpdate). The stale-copy gap
+	// it closes: a skill whose files are rewritten by UpsertByName (the
+	// template's embedded package wins over the library copy) only reached
+	// machines on the next agent edit/connect, so every run in between staged
+	// the OLD version while the library showed the new one. nil in tests.
+	pushSkillUpdate func(skillID string)
 }
 
 // GitTester abstracts the daemon's TestDomainGit probe (the create-domain
@@ -287,6 +294,12 @@ func (s *TemplateApplyService) SetGitTester(t GitTester) { s.gitTester = t }
 // step the HTTP CRUD handlers do (go h.Daemon.PushAgentSkills(...)). nil
 // (tests) = no immediate push; the next machine register back-fills.
 func (s *TemplateApplyService) SetSkillPusher(p func(agentID string)) { s.pushSkills = p }
+
+// SetSkillUpdatePusher wires the daemon's PushSkillUpdate so a skill whose
+// files UpsertByName rewrote is re-pushed to every agent that has it selected
+// (detached + best-effort, like SetSkillPusher). nil (tests) = no re-push;
+// the next agent edit/connect back-fills.
+func (s *TemplateApplyService) SetSkillUpdatePusher(p func(skillID string)) { s.pushSkillUpdate = p }
 
 // ── parsing helpers ──
 
@@ -377,6 +390,12 @@ func (s *TemplateApplyService) resolveSkillID(ctx context.Context, name string) 
 		sk, err := s.skillSvc.UpsertByName(ctx, name, "", pkg)
 		if err != nil {
 			return "", false, fmt.Errorf("导入模板内嵌 skill %q：%v", name, err)
+		}
+		// The skill's files were just (re)written — re-push it to every agent
+		// that has it selected so their machines' staging refreshes (nil in
+		// tests; a NEW skill has no selectors yet → the re-push is a no-op).
+		if s.pushSkillUpdate != nil {
+			s.pushSkillUpdate(sk.ID)
 		}
 		return sk.ID, true, nil
 	}

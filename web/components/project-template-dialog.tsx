@@ -39,7 +39,9 @@ export function ProjectTemplateDialog({ onClose }: { onClose: () => void }) {
 
   const isScratch = spec?.domain?.type === "scratch";
   const repoCreate = Boolean(spec?.repo?.create);
-  const teamAgents: TplAgent[] = spec?.team?.agents ?? [];
+  // teamAgents 必须稳定——`?? []` 每次渲染都分配新数组，放 effect deps
+  // 会造成无限重渲染循环（Maximum update depth exceeded）。useMemo 钉在 spec 上。
+  const teamAgents: TplAgent[] = useMemo(() => spec?.team?.agents ?? [], [spec]);
 
   // 选中模板 / spec 加载完 → 回填默认值（projectName = 模板名；repoSource =
   // repoCreate ? create : existing；rename map 按模板 agent 名播种空串）。

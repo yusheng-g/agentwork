@@ -705,6 +705,8 @@ function EditDomainDialog({ domain, onClose }: { domain: Domain; onClose: () => 
   const [issueAssigneeType, setIssueAssigneeType] = useState(domain.issue_assignee_type || "agent");
   const [issueAssignee, setIssueAssignee] = useState(domain.issue_assignee);
   const [issueProvider, setIssueProvider] = useState(domain.issue_provider || "github");
+  const [pullAssigneeType, setPullAssigneeType] = useState(domain.pull_assignee_type || "agent");
+  const [pullAssignee, setPullAssignee] = useState(domain.pull_assignee);
   // 决策 6-24 延伸：编辑不能绕过创建门槛——git 配置动过就必须重测通过
   // 才能保存（后端同样强制）；没动 git 配置时不拦（仓库已失效仍可改
   // issue 处理方等无关字段）。git 字段一改，旧结果失效。
@@ -729,6 +731,8 @@ function EditDomainDialog({ domain, onClose }: { domain: Domain; onClose: () => 
           issue_assignee: issueAssignee,
           issue_assignee_type: issueAssigneeType,
           issue_provider: issueProvider,
+          pull_assignee: pullAssignee,
+          pull_assignee_type: pullAssigneeType,
         },
       },
       { onSuccess: onClose }
@@ -799,6 +803,28 @@ function EditDomainDialog({ domain, onClose }: { domain: Domain; onClose: () => 
             </select>
           </div>
         </Field>
+        <Field label="PR 拉取处理方（选填）" hint={`与 issue 共用上面的跟踪仓库和平台${deriveIssueSrc(gitUrl) ? `（${deriveIssueSrc(gitUrl)}）` : ""}；选了处理方后，仓库的新 PR 自动变成任务，处理完只评论不关闭——合并/关闭由人决定`}>
+          <div className="flex gap-2 items-center">
+            <select
+              value={pullAssigneeType}
+              onChange={(e) => { setPullAssigneeType(e.target.value); setPullAssignee(""); }}
+              className={inputCls}
+            >
+              <option value="agent">Agent</option>
+              <option value="squad">Squad</option>
+            </select>
+            <select value={pullAssignee} onChange={(e) => setPullAssignee(e.target.value)} className={inputCls}>
+              <option value="">{pullAssigneeType === "agent" ? "不拉取 PR（选择 agent 或 squad 开启）" : "不拉取 PR（选择 squad 开启）"}</option>
+              {pullAssigneeType === "agent"
+                ? agents?.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))
+                : squads?.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+            </select>
+          </div>
+        </Field>
         {update.isError && <p className="text-sm text-red-500">{String(update.error)}</p>}
       </form>
     </Dialog>
@@ -817,6 +843,8 @@ function CreateDomainDialog({ onClose }: { onClose: () => void }) {
   const [policyText, setPolicyText] = useState("");
   const [issueAssigneeType, setIssueAssigneeType] = useState("agent");
   const [issueAssignee, setIssueAssignee] = useState("");
+  const [pullAssigneeType, setPullAssigneeType] = useState("agent");
+  const [pullAssignee, setPullAssignee] = useState("");
   const [gitCredentials, setGitCredentials] = useState("");
   const [gitIdentity, setGitIdentity] = useState("");
   // 决策 6-24 延伸：repo 域必须通过「测试连接」才能创建（后端同样强制，
@@ -826,7 +854,7 @@ function CreateDomainDialog({ onClose }: { onClose: () => void }) {
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     create.mutate(
-      { name, type: domainType, git_url: domainType === "scratch" ? "" : gitUrl, default_branch: domainType === "scratch" ? "" : defaultBranch, policy_text: policyText, processor_agent_id: "", issue_repo: "", issue_assignee: issueAssignee, issue_assignee_type: issueAssigneeType, issue_provider: "", git_credentials: gitCredentials, git_identity: gitIdentity },
+      { name, type: domainType, git_url: domainType === "scratch" ? "" : gitUrl, default_branch: domainType === "scratch" ? "" : defaultBranch, policy_text: policyText, processor_agent_id: "", issue_repo: "", issue_assignee: issueAssignee, issue_assignee_type: issueAssigneeType, issue_provider: "", pull_assignee: pullAssignee, pull_assignee_type: pullAssigneeType, git_credentials: gitCredentials, git_identity: gitIdentity },
       {
         onSuccess: (d) => {
           if (policyText.trim()) {
@@ -908,6 +936,28 @@ function CreateDomainDialog({ onClose }: { onClose: () => void }) {
             <select value={issueAssignee} onChange={(e) => setIssueAssignee(e.target.value)} className={inputCls}>
               <option value="">选择…</option>
               {issueAssigneeType === "agent"
+                ? agents?.map((a) => (
+                    <option key={a.id} value={a.id}>{a.name}</option>
+                  ))
+                : squads?.map((s) => (
+                    <option key={s.id} value={s.id}>{s.name}</option>
+                  ))}
+            </select>
+          </div>
+        </Field>
+        <Field label="PR 拉取处理方（选填）" hint="与 issue 共用上面的跟踪仓库和平台；选了处理方后，仓库的新 PR 自动变成任务，处理完只评论不关闭——合并/关闭由人决定">
+          <div className="flex gap-2 items-center">
+            <select
+              value={pullAssigneeType}
+              onChange={(e) => { setPullAssigneeType(e.target.value); setPullAssignee(""); }}
+              className={inputCls}
+            >
+              <option value="agent">Agent</option>
+              <option value="squad">Squad</option>
+            </select>
+            <select value={pullAssignee} onChange={(e) => setPullAssignee(e.target.value)} className={inputCls}>
+              <option value="">不拉取 PR（选择 agent 或 squad 开启）</option>
+              {pullAssigneeType === "agent"
                 ? agents?.map((a) => (
                     <option key={a.id} value={a.id}>{a.name}</option>
                   ))

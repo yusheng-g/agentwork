@@ -155,6 +155,16 @@ func (s *GoalService) lockReconcile(goalID string) func() {
 	return m.Unlock
 }
 
+// LockGoal is the exported lockReconcile: it hands out the same per-goal
+// serialization mutex for callers outside this package. The issue package's
+// PR-update path takes it around the dedupe (SELECT→compare→UPDATE + feed
+// comment) so concurrent deliveries of the same PR cannot double-insert the
+// feed comment. NOT reentrant — a caller holding it must not re-acquire it on
+// the same goroutine (wakeGoalOwner releases it before Relaunch takes it).
+func (s *GoalService) LockGoal(goalID string) func() {
+	return s.lockReconcile(goalID)
+}
+
 // SetRunService wires the RunService back-reference once both exist. Kept
 // explicit (not in the constructor) to avoid a constructor-order chicken/egg.
 func (s *GoalService) SetRunService(rs *RunService) { s.runSvc = rs }
@@ -1883,6 +1893,118 @@ func (s *GoalService) Reopen(ctx context.Context, goalID, reason, triggerComment
 		trigger = "trigger comment " + triggerCommentID
 	}
 	logging.Infof("goal: %q reopened (%s)", g.Title, trigger)
+	return s.Get(ctx, goalID)
+}
+
+// Relaunch makes an existing goal re-runnable from ANY non-active state —
+// backlog, review, done, failed, cancelled. Unlike Reopen (the HUMAN
+// take-over path, restricted to terminal states), Relaunch is the webhook
+// path: a fresh push on the source PR supersedes whatever state the goal
+// reached, and the PR-update requirement is that the work is ALWAYS
+// re-launched — no state exempt. Back to active with the reason as
+// handoff_note, the prior cycle's gate_decision rows cleared (same rationale
+// as Reopen: a superseded review must not leave stale approve rows behind),
+// and a fresh owner run on the current assignee — all in ONE transaction
+// (P0-2). actorType is stamped on the audit rows ("system" from the
+// PR-update webhook; Reopen keeps "human").
+func (s *GoalService) Relaunch(ctx context.Context, goalID, reason, triggerCommentID, actorType string) (*Goal, error) {
+	// Serialize the status check + the transition against the per-goal
+	// reconcile writers. The run-end reconcile's goal.status writes (the
+	// `UPDATE goal SET status='done'/'failed' … WHERE status NOT IN …` paths)
+	// do NOT take this lock, so an unlocked relaunch racing an in-flight
+	// reconcile could commit active and then be silently overwritten back to
+	// done/failed — leaving the fresh queued run a zombie (the Claim guard
+	// refuses terminal goals). Same lock→tx ordering as reconcileGoalOnce, so
+	// no lock-ordering deadlock.
+	unlock := s.lockReconcile(goalID)
+	defer unlock()
+	g, err := s.Get(ctx, goalID)
+	if err != nil {
+		return nil, err
+	}
+	if g.Status == "active" {
+		return g, nil // already running — the caller's wake path handles updates
+	}
+	switch g.Status {
+	case "backlog", "review", "done", "failed", "cancelled":
+		// relaunchable
+	default:
+		return nil, NewCodedErrorDetail(CodeGoalNotReopenable, fmt.Sprintf("cannot relaunch: the goal is %s", g.Status), map[string]any{"status": g.Status})
+	}
+	note := "Relaunched"
+	if reason != "" {
+		note += ": " + reason
+	}
+	// P0-2 (决策 6-15②): the state → active transition, the audit rows and
+	// the successor run are born in ONE transaction — a crash between the
+	// UPDATE and the enqueue must not leave a run-less active goal.
+	tx, err := s.st.DB().BeginTx(ctx, nil)
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE goal SET status='active', handoff_note=?, review_request='' WHERE id=? AND status IN ('backlog','review','done','failed','cancelled')`,
+		note, goalID); err != nil {
+		return nil, fmt.Errorf("relaunch goal: %w", err)
+	}
+	// Clear the prior cycle's gate_decision rows — same rationale as Reopen:
+	// ResolveReview's duplicate-decision guard, maybeFireReviewReady's
+	// `decided > 0` gate and deliver's latest-decision lookup all break on a
+	// stale approve left behind by a superseded review cycle.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM gate_decision WHERE goal_id=?`, goalID); err != nil {
+		return nil, fmt.Errorf("clear gate_decision on relaunch: %w", err)
+	}
+	// Cancel the prior cycle's pending review runs. A parked review's
+	// queued/running role='review' runs would be claimable on the now-active
+	// goal (the Claim guard admits ANY role once the goal is active) and would
+	// fire a STALE review cycle — producing a spurious gate_decision whose
+	// approve then triggers the deliver pipeline while the fresh owner run is
+	// still working. Mirrors the gate_decision clear above; stamped silently
+	// (same as RecoverStuckRunning).
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE run SET status='cancelled', cancel_reason='superseded' WHERE goal_id=? AND role='review' AND status IN ('queued','running')`, goalID); err != nil {
+		return nil, fmt.Errorf("cancel pending review runs on relaunch: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO activity_log (id,goal_id,actor_type,actor_id,action,detail,created_at) VALUES (?,?,?,?,'reopened',?,?)`,
+		newID(), goalID, actorType, "", "{}", now()); err != nil {
+		return nil, fmt.Errorf("insert activity: %w", err)
+	}
+	// A non-empty reason lands in the feed as a "重开：" comment. The
+	// PR-update caller passes NO reason — its own pr-webhook update comment
+	// is already the reason (and the run's trigger); a duplicate would be
+	// feed noise (same rationale as Reopen's comment-triggered path).
+	if reason != "" {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO comment (id,goal_id,author_type,author_id,parent_id,content,created_at) VALUES (?,?,?,'',NULL,?,?)`,
+			newID(), goalID, actorType, "重开："+reason, now()); err != nil {
+			return nil, fmt.Errorf("insert relaunch comment: %w", err)
+		}
+	}
+	// Fresh run on the current assignee (the unified owner-run spawn, P0.5;
+	// human-assigned goals stay manual — no agent to auto-run).
+	var runEv *events.Event
+	if agentID, isLeader, squadID, err := s.runSvc.resolveLeaderTx(ctx, tx, g.AssigneeType, g.AssigneeID); err != nil {
+		return nil, fmt.Errorf("resolve assignee after relaunch: %w", err)
+	} else if agentID != "" {
+		_, runEv, err = s.runSvc.enqueueTx(ctx, tx, goalID, agentID, 1, isLeader, squadID, triggerCommentID, "", "", "owner")
+		if err != nil {
+			return nil, fmt.Errorf("enqueue after relaunch: %w", err)
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if runEv != nil {
+		s.bus.Publish(ctx, *runEv)
+	}
+	trigger := "manual"
+	if triggerCommentID != "" {
+		trigger = "trigger comment " + triggerCommentID
+	}
+	logging.Infof("goal: %q relaunched from %s (%s)", g.Title, g.Status, trigger)
 	return s.Get(ctx, goalID)
 }
 

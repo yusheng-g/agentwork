@@ -25,8 +25,8 @@ state, in-process event bus, Go daemon + Next.js web UI.
   exposed as the `agentwork` CLI with owner-only permissions enforced server-side
 - **Multi-protocol & transport** — ACP / JSONL / JSON-RPC over stdio / ws / tcp;
   agents can carry their own extra MCP servers
-- **Triggers** — Web, cron schedules, GitHub/GitCode issues (webhook + poll),
-  Feishu IM inbound (@-bot task creation)
+- **Triggers** — Web, cron schedules, GitHub/GitCode issues + pull requests
+  (poll; issues also webhook), Feishu IM inbound (@-bot task creation)
 - **Feishu notifications** — approval cards (approve/reject right in IM),
   completion/failure pushes, a daily digest
 - **Real-time web UI** — live event stream, execution timeline, sub-goal /
@@ -100,7 +100,7 @@ npm run build && npm start
 | **Gates** | Human checkpoint rules from the acceptance policy (merge, diff_contains, ...); weak verification forces a checkpoint. |
 | **Mention** | The Consult primitive: a structured URI in a comment pulls an agent into a read-only guest run; the requester resumes automatically after the answer. |
 | **Schedule** | A cron template that clones a goal per firing (idempotent, timezone-aware). |
-| **Trigger** | Web, cron, GitHub/GitCode issues (webhook + poll, deduped by source ref), Feishu IM inbound. |
+| **Trigger** | Web, cron, GitHub/GitCode issues + PRs (poll, deduped by source ref; issues also webhook), Feishu IM inbound. |
 
 ## Collaboration (four behaviors)
 

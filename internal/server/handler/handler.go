@@ -838,10 +838,12 @@ func (h *Handlers) gateStats(w http.ResponseWriter, r *http.Request) {
 
 // ── issue comments (M4-B) ──
 
-// createIssueComment posts a comment on the issue behind a goal: the goal's
-// source_ref names the repo+number, the domain's git_credentials is the
-// GitHub token — the agent never touches either (the platform executes the
-// structured side effect).
+// createIssueComment posts a comment on the issue/PR behind a goal: the
+// goal's source_ref names the repo+number, the domain's git_credentials is
+// the platform token — the agent never touches either (the platform executes
+// the structured side effect). The ref's kind routes the endpoint: a PR's
+// dialogue lives on a dedicated API surface (GitCode: /pulls/:n/comments;
+// GitHub: the issues endpoint).
 func (h *Handlers) createIssueComment(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		GoalID string `json:"goal_id"`
@@ -864,7 +866,7 @@ func (h *Handlers) createIssueComment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, nil, service.NewValidationError("goal has no issue source"))
 		return
 	}
-	provider, repo, number, ok := issue.ParseSourceRef(ref)
+	provider, repo, number, kind, ok := issue.ParseSourceRef(ref)
 	if !ok {
 		writeJSON(w, nil, service.NewValidationError("goal source is not an issue ref"))
 		return
@@ -878,7 +880,12 @@ func (h *Handlers) createIssueComment(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, nil, err)
 		return
 	}
-	if err := client.CreateComment(r.Context(), repo, number, body.Text); err != nil {
+	if kind == issue.RefPull {
+		err = client.CreatePullComment(r.Context(), repo, number, body.Text)
+	} else {
+		err = client.CreateComment(r.Context(), repo, number, body.Text)
+	}
+	if err != nil {
 		writeJSON(w, nil, err)
 		return
 	}

@@ -41,6 +41,9 @@ build/
 *.db-*
 .agentwork/
 
+# Local scratch (archify diagram sources, review worktrees — kept locally, never pushed)
+tmp/
+
 # Node / frontend (root-level backstop; web/ has its own .gitignore too)
 node_modules/
 

@@ -44,6 +44,8 @@ type Domain struct {
 	IssueAssignee        string `json:"issue_assignee"`        // M4-B: agent|squad id handling this repo's issues ('' = don't auto-create)
 	IssueAssigneeType    string `json:"issue_assignee_type"`   // M4-B: agent | squad (default agent)
 	IssueProvider        string `json:"issue_provider"`        // M4-B: github | gitcode (default github)
+	PullAssignee         string `json:"pull_assignee"`         // M4-B PR pull: agent|squad id handling this repo's pull requests ('' = don't pull PRs)
+	PullAssigneeType     string `json:"pull_assignee_type"`    // M4-B PR pull: agent | squad (default agent)
 	CreatedAt            string `json:"created_at"`
 	// ScratchDir is the scratch domain's persistent project root on disk
 	// ('' for repo domains) — the UI shows it so the human can find the
@@ -290,9 +292,9 @@ func (s *DomainService) Create(ctx context.Context, d Domain) (*Domain, error) {
 	d.CreatedAt = now()
 	checksJSON, _ := json.Marshal(d.Checks)
 	_, err := s.st.DB().ExecContext(ctx,
-		`INSERT INTO domain (id,type,name,git_url,default_branch,git_identity,git_credentials,policy_text,checks,verification_strength,max_run_duration,verify_timeout,processor_agent_id,checks_compiled_at,metrics_baseline,issue_repo,issue_assignee,issue_assignee_type,issue_provider,created_at)
-		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		d.ID, d.Type, d.Name, d.GitURL, d.DefaultBranch, d.GitIdentity, d.GitCredentials, d.PolicyText, string(checksJSON), d.VerificationStrength, d.MaxRunDuration, d.VerifyTimeout, d.ProcessorAgentID, d.ChecksCompiledAt, d.MetricsBaseline, d.IssueRepo, d.IssueAssignee, d.IssueAssigneeType, d.IssueProvider, d.CreatedAt)
+		`INSERT INTO domain (id,type,name,git_url,default_branch,git_identity,git_credentials,policy_text,checks,verification_strength,max_run_duration,verify_timeout,processor_agent_id,checks_compiled_at,metrics_baseline,issue_repo,issue_assignee,issue_assignee_type,issue_provider,pull_assignee,pull_assignee_type,created_at)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		d.ID, d.Type, d.Name, d.GitURL, d.DefaultBranch, d.GitIdentity, d.GitCredentials, d.PolicyText, string(checksJSON), d.VerificationStrength, d.MaxRunDuration, d.VerifyTimeout, d.ProcessorAgentID, d.ChecksCompiledAt, d.MetricsBaseline, d.IssueRepo, d.IssueAssignee, d.IssueAssigneeType, d.IssueProvider, d.PullAssignee, d.PullAssigneeType, d.CreatedAt)
 	if err != nil {
 		if ve := dupNameCodedError(err, CodeDomainNameExists, "domain", d.Name); ve != nil {
 			return nil, ve
@@ -312,7 +314,7 @@ func fillScratchDir(d *Domain) {
 
 func (s *DomainService) List(ctx context.Context) ([]Domain, error) {
 	rows, err := s.st.DB().QueryContext(ctx,
-		`SELECT id,type,name,git_url,default_branch,git_identity,git_credentials,policy_text,checks,verification_strength,max_run_duration,verify_timeout,processor_agent_id,checks_compiled_at,metrics_baseline,issue_repo,issue_assignee,issue_assignee_type,issue_provider,created_at
+		`SELECT id,type,name,git_url,default_branch,git_identity,git_credentials,policy_text,checks,verification_strength,max_run_duration,verify_timeout,processor_agent_id,checks_compiled_at,metrics_baseline,issue_repo,issue_assignee,issue_assignee_type,issue_provider,pull_assignee,pull_assignee_type,created_at
 		 FROM domain ORDER BY created_at`)
 	if err != nil {
 		return nil, err
@@ -322,7 +324,7 @@ func (s *DomainService) List(ctx context.Context) ([]Domain, error) {
 	for rows.Next() {
 		var d Domain
 		var checksJSON string
-		if err := rows.Scan(&d.ID, &d.Type, &d.Name, &d.GitURL, &d.DefaultBranch, &d.GitIdentity, &d.GitCredentials, &d.PolicyText, &checksJSON, &d.VerificationStrength, &d.MaxRunDuration, &d.VerifyTimeout, &d.ProcessorAgentID, &d.ChecksCompiledAt, &d.MetricsBaseline, &d.IssueRepo, &d.IssueAssignee, &d.IssueAssigneeType, &d.IssueProvider, &d.CreatedAt); err != nil {
+		if err := rows.Scan(&d.ID, &d.Type, &d.Name, &d.GitURL, &d.DefaultBranch, &d.GitIdentity, &d.GitCredentials, &d.PolicyText, &checksJSON, &d.VerificationStrength, &d.MaxRunDuration, &d.VerifyTimeout, &d.ProcessorAgentID, &d.ChecksCompiledAt, &d.MetricsBaseline, &d.IssueRepo, &d.IssueAssignee, &d.IssueAssigneeType, &d.IssueProvider, &d.PullAssignee, &d.PullAssigneeType, &d.CreatedAt); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(checksJSON), &d.Checks)
@@ -338,9 +340,9 @@ func (s *DomainService) Get(ctx context.Context, id string) (*Domain, error) {
 	var d Domain
 	var checksJSON string
 	err := s.st.DB().QueryRowContext(ctx,
-		`SELECT id,type,name,git_url,default_branch,git_identity,git_credentials,policy_text,checks,verification_strength,max_run_duration,verify_timeout,processor_agent_id,checks_compiled_at,metrics_baseline,issue_repo,issue_assignee,issue_assignee_type,issue_provider,created_at
+		`SELECT id,type,name,git_url,default_branch,git_identity,git_credentials,policy_text,checks,verification_strength,max_run_duration,verify_timeout,processor_agent_id,checks_compiled_at,metrics_baseline,issue_repo,issue_assignee,issue_assignee_type,issue_provider,pull_assignee,pull_assignee_type,created_at
 		 FROM domain WHERE id=?`, id).
-		Scan(&d.ID, &d.Type, &d.Name, &d.GitURL, &d.DefaultBranch, &d.GitIdentity, &d.GitCredentials, &d.PolicyText, &checksJSON, &d.VerificationStrength, &d.MaxRunDuration, &d.VerifyTimeout, &d.ProcessorAgentID, &d.ChecksCompiledAt, &d.MetricsBaseline, &d.IssueRepo, &d.IssueAssignee, &d.IssueAssigneeType, &d.IssueProvider, &d.CreatedAt)
+		Scan(&d.ID, &d.Type, &d.Name, &d.GitURL, &d.DefaultBranch, &d.GitIdentity, &d.GitCredentials, &d.PolicyText, &checksJSON, &d.VerificationStrength, &d.MaxRunDuration, &d.VerifyTimeout, &d.ProcessorAgentID, &d.ChecksCompiledAt, &d.MetricsBaseline, &d.IssueRepo, &d.IssueAssignee, &d.IssueAssigneeType, &d.IssueProvider, &d.PullAssignee, &d.PullAssigneeType, &d.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
@@ -433,7 +435,7 @@ func deriveIssueSource(gitURL string) (ownerRepo, provider string) {
 }
 
 func (s *DomainService) validateIssueTracking(ctx context.Context, d *Domain) error {
-	if d.Type == "scratch" && (d.IssueRepo != "" || d.IssueAssignee != "") {
+	if d.Type == "scratch" && (d.IssueRepo != "" || d.IssueAssignee != "" || d.PullAssignee != "") {
 		return NewValidationError("issue tracking needs a repository — not available on a scratch domain")
 	}
 	if d.IssueAssignee != "" {
@@ -468,6 +470,38 @@ func (s *DomainService) validateIssueTracking(ctx context.Context, d *Domain) er
 			return NewValidationError("issue_assignee_type must be agent or squad")
 		}
 	}
+	// M4-B PR pull: mirrors the issue-tracking validation — the PR handler
+	// reuses the issue tracking's repo/provider (one repo, one tracking
+	// config), only the assignee side is new ('' = don't pull PRs).
+	if d.PullAssignee != "" {
+		if d.IssueRepo == "" {
+			return NewValidationError("PR pulling needs a repository (derivable from git_url)")
+		}
+		if d.GitCredentials == "" {
+			return NewValidationError("PR pulling needs git_credentials (the platform token)")
+		}
+		if d.IssueProvider == "" {
+			d.IssueProvider = "github"
+		}
+		if d.IssueProvider != "github" && d.IssueProvider != "gitcode" {
+			return NewValidationError("issue_provider must be github or gitcode")
+		}
+		if d.PullAssigneeType == "" {
+			d.PullAssigneeType = "agent"
+		}
+		switch d.PullAssigneeType {
+		case "agent":
+			if err := mustExist(ctx, s.st, `SELECT COUNT(*) FROM agent WHERE id=?`, d.PullAssignee, "PR assignee"); err != nil {
+				return err
+			}
+		case "squad":
+			if err := mustExist(ctx, s.st, `SELECT COUNT(*) FROM squad WHERE id=?`, d.PullAssignee, "PR assignee squad"); err != nil {
+				return err
+			}
+		default:
+			return NewValidationError("pull_assignee_type must be agent or squad")
+		}
+	}
 	return nil
 }
 
@@ -495,8 +529,8 @@ func (s *DomainService) Update(ctx context.Context, id string, d Domain) (*Domai
 		return nil, err
 	}
 	_, err = s.st.DB().ExecContext(ctx,
-		`UPDATE domain SET git_url=?, default_branch=?, git_identity=?, git_credentials=?, issue_repo=?, issue_assignee=?, issue_assignee_type=?, issue_provider=? WHERE id=?`,
-		d.GitURL, d.DefaultBranch, d.GitIdentity, d.GitCredentials, d.IssueRepo, d.IssueAssignee, d.IssueAssigneeType, d.IssueProvider, id)
+		`UPDATE domain SET git_url=?, default_branch=?, git_identity=?, git_credentials=?, issue_repo=?, issue_assignee=?, issue_assignee_type=?, issue_provider=?, pull_assignee=?, pull_assignee_type=? WHERE id=?`,
+		d.GitURL, d.DefaultBranch, d.GitIdentity, d.GitCredentials, d.IssueRepo, d.IssueAssignee, d.IssueAssigneeType, d.IssueProvider, d.PullAssignee, d.PullAssigneeType, id)
 	if err != nil {
 		return nil, fmt.Errorf("update domain: %w", err)
 	}

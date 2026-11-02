@@ -128,7 +128,9 @@ function RunTable({ runs, goalId, agentName }: { runs: Run[]; goalId: string; ag
 // every run:event over the WS.
 function RunCard({ run, goalId, agentName }: { run: Run; goalId: string; agentName: (id: string) => string }) {
   const [open, setOpen] = useState(false);
-  const { data: messages, refetch } = useGoalRunMessages(goalId, run.id);
+  // 折叠的卡片不拉交互流——enabled 钉在 open 上，展开才拉取
+  // （否则打开一个 goal 会为每条历史 run 各发一次消息请求）。
+  const { data: messages, refetch } = useGoalRunMessages(goalId, run.id, open);
   // The live stream refreshes on run:event — but that broadcast is
   // PER-TOKEN for every run on the platform: filter to THIS run and
   // throttle (the persisted rows are aggregated, so adjacent events

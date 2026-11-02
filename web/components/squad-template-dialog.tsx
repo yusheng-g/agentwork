@@ -31,7 +31,9 @@ export function SquadTemplateDialog({ onClose }: { onClose: () => void }) {
 
   const apply = useApplySquadTemplate();
 
-  const specAgents: TplAgent[] = spec?.agents ?? [];
+  // specAgents 必须稳定——`?? []` 每次渲染都分配新数组，放 effect deps
+  // 会造成无限重渲染循环（Maximum update depth exceeded）。useMemo 钉在 spec 上。
+  const specAgents: TplAgent[] = useMemo(() => spec?.agents ?? [], [spec]);
   const specSquad = spec?.squad;
 
   useEffect(() => {

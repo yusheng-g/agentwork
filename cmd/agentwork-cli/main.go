@@ -91,9 +91,11 @@ func main() {
 	}
 }
 
-// issueCmd lets the agent reply to the issue behind its current goal (M4-B):
-// the platform owns the GitHub token and executes the comment — the agent
-// only produces the structured side effect.
+// issueCmd lets the agent reply to the issue/PR behind its current goal
+// (M4-B): the platform owns the git-host token and executes the comment —
+// the agent only produces the structured side effect. PR-sourced goals are
+// routed by the platform: the comment lands on the PR's own API surface
+// (GitCode: /pulls/:n/comments), no separate command needed.
 func issueCmd(goalID string, args []string) {
 	if len(args) < 1 {
 		fmt.Fprintln(os.Stderr, "usage: agentwork-cli issue comment --text \"...\"")
@@ -189,9 +191,10 @@ Subcommands:
                                              + counts per status (backlog/active/blocked/done/
                                              failed/cancelled) and run totals + counts per status
                                              (queued/running/completed/failed/cancelled)
-  issue comment --text T                     reply to the issue behind the current goal
-                                             (the platform owns the token; only for
-                                             issue-sourced goals, M4-B)
+  issue comment --text T                     reply to the issue/PR behind the current goal
+                                             (the platform owns the token and routes by source
+                                             kind — a PR goal's comment lands on the PR; only
+                                             for source-tracked goals, M4-B)
 
   version                                    print the CLI build version and exit
 

@@ -140,7 +140,9 @@ export function ChatPanel({ agentId, agentName, onClose }: { agentId: string; ag
   const send = async () => {
     const client = clientRef.current;
     const text = input.trim();
-    if (!client || !current || !text) return;
+    // busy 必须挡在入口——Enter 键不走 Button 的 disabled，双击/回车
+    // 会在同一会话上叠加第二个 prompt。
+    if (!client || !current || !text || busy) return;
     setInput("");
     agentActivity.current = false;
     push({ kind: "user", text });
@@ -191,7 +193,8 @@ export function ChatPanel({ agentId, agentName, onClose }: { agentId: string; ag
               <button
                 key={s.sessionId}
                 onClick={() => openSession(s)}
-                className="block w-full text-left px-3 py-2 rounded-lg border border-zinc-200 hover:border-indigo-300 text-sm"
+                disabled={busy}
+                className="block w-full text-left px-3 py-2 rounded-lg border border-zinc-200 hover:border-indigo-300 text-sm disabled:opacity-50"
               >
                 <span className="font-medium text-zinc-800">{s.title || s.sessionId.slice(0, 12)}</span>
                 <span className="ml-2 text-xs text-zinc-400">{s.updatedAt ? new Date(s.updatedAt).toLocaleString() : ""}</span>

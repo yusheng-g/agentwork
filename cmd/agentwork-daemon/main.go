@@ -155,6 +155,15 @@ func main() {
 	templateApplySvc.SetSkillPusher(func(agentID string) {
 		d.PushAgentSkills(context.Background(), agentID)
 	})
+	// Skill updates (UpsertByName rewrites the files) re-push the CURRENT
+	// archive to every agent that has the skill selected — detached so the
+	// apply/import flow doesn't block on N machine pushes.
+	templateApplySvc.SetSkillUpdatePusher(func(skillID string) {
+		go d.PushSkillUpdate(skillID)
+	})
+	teamImportSvc.SetSkillUpdatePusher(func(skillID string) {
+		go d.PushSkillUpdate(skillID)
+	})
 	go func() {
 		if err := d.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			logging.Errorf("daemon: %v", err)

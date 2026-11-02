@@ -146,7 +146,9 @@ export default function AgentsPage() {
                             {pinned ? "已固定" : "固定"}
                           </button>
                           <button
-                            onClick={() => del.mutate(a.id)}
+                            onClick={() => {
+                              if (confirm(`删除 agent「${a.name}」？被 goal/schedule/squad 引用时会被拒绝。`)) del.mutate(a.id);
+                            }}
                             className="text-xs text-zinc-400 hover:text-red-600 transition-colors"
                           >
                             删除
@@ -162,6 +164,16 @@ export default function AgentsPage() {
 
           {agents && agents.length === 0 && (
             <Empty>还没有 agent。点「+ 新建」创建一个。</Empty>
+          )}
+
+          {/* 删除失败必须显示——后端守卫（agent 被 goal/schedule/squad 引用）
+              返回 400 coded error，静默等于「点了没反应」。 */}
+          {del.isError && (
+            <p className="text-sm text-red-500 mt-3">{String(del.error)}</p>
+          )}
+          {/* 固定/取消固定失败同样要显示（侧栏按钮无任何反馈路径）。 */}
+          {toggle.isError && (
+            <p className="text-sm text-red-500 mt-3">{String(toggle.error)}</p>
           )}
         </div>
       </div>

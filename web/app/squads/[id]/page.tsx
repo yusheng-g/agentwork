@@ -112,7 +112,8 @@ export default function SquadDetailPage() {
                     <td className="px-3 py-2">
                       <button
                         onClick={() => removeMember.mutate({ squadId: id, memberId: m.member_id })}
-                        className="text-red-500 hover:text-red-700 text-xs"
+                        disabled={removeMember.isPending && removeMember.variables?.memberId === m.member_id}
+                        className="text-red-500 hover:text-red-700 text-xs disabled:opacity-50"
                         title="移除该成员"
                       >✕</button>
                     </td>
@@ -123,6 +124,11 @@ export default function SquadDetailPage() {
           )}
         </div>
       </div>
+
+      {/* 成员移除失败必须显示——后端 400 错误静默等于「点了没反应」。 */}
+      {removeMember.isError && (
+        <p className="text-sm text-red-500">{String(removeMember.error)}</p>
+      )}
 
       {/* Add member dialog */}
       {showAdd && (
@@ -172,6 +178,10 @@ export default function SquadDetailPage() {
             <Field label="Instructions" hint="leader 运行时会注入这些 instructions">
               <textarea value={editInstr} onChange={(e) => setEditInstr(e.target.value)} className={inputCls} rows={3} placeholder="Squad 工作说明…" />
             </Field>
+            {/* 保存失败必须显示——leader 校验等后端 400 错误静默等于「点了没反应」。 */}
+            {updateSquad.isError && (
+              <p className="text-sm text-red-500">{String(updateSquad.error)}</p>
+            )}
           </div>
         </Dialog>
       )}

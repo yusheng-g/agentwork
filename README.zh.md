@@ -22,8 +22,8 @@ daemon + Next.js Web 界面。
   （拆活），以 `agentwork` CLI 暴露，owner 权限在服务端强制
 - **多协议多传输** — ACP / JSONL / JSON-RPC × stdio / ws / tcp；agent 可挂
   自己的额外 MCP 服务器
-- **多触发渠道** — Web、cron 定时、GitHub/GitCode issue（webhook + 轮询）、
-  飞书入站（@机器人 建任务）
+- **多触发渠道** — Web、cron 定时、GitHub/GitCode issue + PR（轮询；issue 另有
+  webhook）、飞书入站（@机器人 建任务）
 - **飞书通知** — 审批卡（IM 内直接批/驳）、完成/失败推送、每日摘要
 - **实时 Web UI** — 事件流、执行时间线、子任务 / 变更 / 验证记录面板
 - **Agent 聊天（ACP 桥）** — Web 就是每个 agent 的真实 ACP 客户端：
@@ -91,7 +91,7 @@ npm run build && npm start
 | **卡点（Gate）** | 验收策略中的人工检查点规则（merge、diff_contains…）；弱验证强制人工段 |
 | **Mention** | Consult 原语：评论里的结构化 URI 把 agent 拉进只读 guest run，回答后平台自动恢复发起者 |
 | **定时任务（Schedule）** | cron 模板，每次触发克隆一个 goal（幂等、时区感知） |
-| **触发渠道** | Web、cron、GitHub/GitCode issue（webhook + 轮询，source_ref 去重）、飞书入站 |
+| **触发渠道** | Web、cron、GitHub/GitCode issue + PR（轮询，source_ref 去重；issue 另有 webhook）、飞书入站 |
 
 ## 协作（四种行为）
 
@@ -166,4 +166,4 @@ agentwork stats                 #   或设 AGENTWORK_SERVER_URL）
 | **协议** | ACP、JSONL、JSON-RPC |
 | **传输** | stdio、WebSocket、TCP |
 | **通知** | 飞书（审批卡、日报、IM 入站） |
-| **Issue 触发** | GitHub、GitCode |
+| **Issue/PR 触发** | GitHub、GitCode |

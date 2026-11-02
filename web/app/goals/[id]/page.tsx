@@ -1,6 +1,7 @@
 "use client";
 
-import { useParams } from "next/navigation";
+import { Suspense } from "react";
+import { useParams, useSearchParams } from "next/navigation";
 import Link from "next/link";
 import { useGoal, useAgents, useSquads, useGoalEvents } from "@/lib/queries";
 import { GoalActions } from "@/components/goal-actions";
@@ -13,8 +14,18 @@ import { Badge, AttentionChip } from "@/components/ui";
 import type { Goal } from "@/lib/types";
 
 export default function GoalDetailPage() {
+  // useSearchParams 要求 Suspense 边界。
+  return (
+    <Suspense fallback={<div className="p-8 text-sm text-zinc-400">加载中…</div>}>
+      <GoalDetailPageInner />
+    </Suspense>
+  );
+}
+
+function GoalDetailPageInner() {
   useGoalEvents();
   const params = useParams<{ id: string }>();
+  const searchParams = useSearchParams();
   const id = params.id;
   const { data: goal, isLoading } = useGoal(id);
   const { data: agents } = useAgents();
@@ -35,7 +46,11 @@ export default function GoalDetailPage() {
     <div className="p-8 space-y-5 max-w-4xl page-enter">
       {/* Breadcrumb */}
       <div>
-        <Link href="/goals" className="text-sm text-zinc-400 hover:text-zinc-700 hover:underline">
+        {/* 从带筛选的列表进来（?status=…）时，返回列表保持筛选不丢 */}
+        <Link
+          href={searchParams.get("status") ? `/goals?status=${searchParams.get("status")}` : "/goals"}
+          className="text-sm text-zinc-400 hover:text-zinc-700 hover:underline"
+        >
           ← 返回列表
         </Link>
         <div className="flex items-center gap-3 mt-3">

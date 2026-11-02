@@ -78,8 +78,8 @@ export default function SchedulesPage() {
                   <td className="px-4 py-3 text-right space-x-3">
                     <button
                       onClick={() => setEnabled.mutate({ id: s.id, enabled: !s.enabled })}
-                      disabled={setEnabled.isPending}
-                      className={`text-xs transition-colors ${
+                      disabled={setEnabled.isPending && setEnabled.variables?.id === s.id}
+                      className={`text-xs transition-colors disabled:opacity-50 ${
                         s.enabled ? "text-emerald-600 hover:text-emerald-700" : "text-zinc-400 hover:text-zinc-600"
                       }`}
                     >
@@ -127,6 +127,13 @@ export default function SchedulesPage() {
           onClose={() => setDeleteTarget(null)}
           loading={deleteSchedule.isPending}
         />
+      )}
+
+      {/* 启停/删除失败必须显示——静默等于「点了没反应」。 */}
+      {(setEnabled.isError || deleteSchedule.isError) && (
+        <p className="text-sm text-red-500 mt-3">
+          {String(setEnabled.error ?? deleteSchedule.error)}
+        </p>
       )}
     </div>
   );

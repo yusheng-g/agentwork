@@ -209,6 +209,8 @@ export const createDomain = (body: {
   issue_assignee?: string;
   issue_assignee_type?: string;
   issue_provider?: string;
+  pull_assignee?: string; // PR 拉取处理方（'' = 不拉取 PR）
+  pull_assignee_type?: string; // agent | squad
 }) => api<Domain>("/domains", { method: "POST", body: JSON.stringify(body) });
 
 // updateDomain edits a domain's mutable config (issue handler etc.).
@@ -221,6 +223,8 @@ export const updateDomain = (id: string, body: {
   issue_assignee?: string;
   issue_assignee_type?: string;
   issue_provider?: string;
+  pull_assignee?: string; // PR 拉取处理方（'' = 不拉取 PR）
+  pull_assignee_type?: string; // agent | squad
 }) => api<Domain>(`/domains/${id}`, { method: "PUT", body: JSON.stringify(body) });
 export const deleteDomain = (id: string) =>
   api<void>(`/domains/${id}`, { method: "DELETE" });

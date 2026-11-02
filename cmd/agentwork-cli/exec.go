@@ -610,10 +610,20 @@ func skillSubdir(cli string) string {
 	}
 }
 
+// skillManagedMarker marks a workdir skill dir as platform-copied:
+// copyAgentSkills writes it into every dir it copies; removeStaleSkillCopies
+// removes ONLY marker-carrying dirs. The repository's own skill dirs (no
+// marker) are never touched.
+const skillManagedMarker = ".agentwork-managed"
+
 // copyAgentSkills stages the agent's pushed skill packages into the
 // workdir's project-level skill directory. wipe removes the target subdir
-// first (platform-owned scratch workdirs); repo workdirs are overwrite-only
-// — the repository's own files in that path are preserved.
+// first (platform-owned scratch workdirs — a full projection of the staging
+// set). Repo workdirs overwrite + deselect-clean: every copied dir carries
+// skillManagedMarker, so dirs the platform previously copied but that are no
+// longer in the staging set (the skill was deselected) are removed — without
+// the cleanup a deselected skill kept loading from the stale workdir copy;
+// the repository's own dirs (no marker) are preserved.
 func copyAgentSkills(agentID, workdir, subdir string, wipe bool) {
 	root := machineSkillRoot(agentID)
 	entries, err := os.ReadDir(root)
@@ -632,6 +642,8 @@ func copyAgentSkills(agentID, workdir, subdir string, wipe bool) {
 	cliLogf("exec: copyAgentSkills agent=%s: %d skill(s) %v → %s (wipe=%v)", agentID, len(skillDirs), skillDirs, target, wipe)
 	if wipe {
 		_ = os.RemoveAll(target)
+	} else {
+		removeStaleSkillCopies(target, skillDirs)
 	}
 	for _, ent := range entries {
 		if !ent.IsDir() {
@@ -658,6 +670,42 @@ func copyAgentSkills(agentID, workdir, subdir string, wipe bool) {
 			_ = os.WriteFile(out, b, 0o644)
 			return nil
 		})
+		// Mark the copy platform-owned: the next non-wipe run may remove it
+		// when the skill is no longer in the staging set.
+		_ = os.WriteFile(filepath.Join(dst, skillManagedMarker),
+			[]byte("platform-managed by agentwork — removed automatically when the skill is deselected\n"), 0o644)
+	}
+}
+
+// removeStaleSkillCopies deletes deselected platform skill copies from a
+// non-wipe (repo) workdir: dirs carrying skillManagedMarker that are no
+// longer in the machine staging set. The repository's own dirs are never
+// touched (no marker). Best-effort — a failed removal leaves the copy; the
+// next run retries.
+func removeStaleSkillCopies(target string, current []string) {
+	entries, err := os.ReadDir(target)
+	if err != nil {
+		return // no target dir yet — nothing stale
+	}
+	live := make(map[string]bool, len(current))
+	for _, n := range current {
+		live[n] = true
+	}
+	removed := 0
+	for _, ent := range entries {
+		if !ent.IsDir() || live[ent.Name()] {
+			continue
+		}
+		dir := filepath.Join(target, ent.Name())
+		if _, err := os.Stat(filepath.Join(dir, skillManagedMarker)); err != nil {
+			continue // no marker — the repository's own dir, keep it
+		}
+		if err := os.RemoveAll(dir); err == nil {
+			removed++
+		}
+	}
+	if removed > 0 {
+		cliLogf("exec: copyAgentSkills: removed %d deselected skill dir(s) from %s", removed, target)
 	}
 }
 

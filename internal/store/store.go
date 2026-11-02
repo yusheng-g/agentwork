@@ -79,6 +79,10 @@ func Open(path string) (*Store, error) {
 	for _, mig := range []string{
 		`ALTER TABLE team_import ADD COLUMN goal_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE INDEX IF NOT EXISTS idx_team_import_goal ON team_import(goal_id)`,
+		// M4-B PR pull (GitCode PR → goal): the PR handler reuses the issue
+		// tracking's repo/provider — only the assignee side is new.
+		`ALTER TABLE domain ADD COLUMN pull_assignee TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE domain ADD COLUMN pull_assignee_type TEXT NOT NULL DEFAULT 'agent'`,
 	} {
 		if _, err := db.Exec(mig); err != nil && !strings.Contains(err.Error(), "duplicate column") {
 			db.Close()

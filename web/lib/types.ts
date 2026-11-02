@@ -141,6 +141,8 @@ export interface Domain {
   issue_assignee: string; // M4-B: agent|squad handling this repo's issues
   issue_assignee_type: string; // M4-B: agent | squad
   issue_provider: string; // M4-B: github | gitcode
+  pull_assignee: string; // M4-B PR pull: agent|squad handling this repo's PRs ('' = don't pull PRs)
+  pull_assignee_type: string; // M4-B PR pull: agent | squad
   created_at: string;
   scratch_dir?: string; // scratch 域的项目目录（repo 域无）——人找产物的路径
 }

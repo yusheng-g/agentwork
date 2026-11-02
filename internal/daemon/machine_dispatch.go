@@ -992,3 +992,16 @@ func (d *Daemon) SkillAgents(ctx context.Context, skillID string) []string {
 	}
 	return ids
 }
+
+// PushSkillUpdate re-pushes one skill's CURRENT archive to every agent that
+// has it selected — each machine's config.push carries the updated package,
+// so the machine staging dir refreshes and the next run stages the fresh
+// version. Closes the stale-copy gap: skill updates (UpsertByName — template
+// apply / team import) used to reach machines only on the next agent edit or
+// register. Detached + best-effort (the callers invoke it in a goroutine).
+func (d *Daemon) PushSkillUpdate(skillID string) {
+	ctx := context.Background()
+	for _, id := range d.SkillAgents(ctx, skillID) {
+		d.PushAgentSkills(ctx, id)
+	}
+}

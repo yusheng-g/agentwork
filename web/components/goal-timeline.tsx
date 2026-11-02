@@ -299,7 +299,9 @@ function FlowCard({ items, active, agentName, nowMs, goalStatus, goalId }: {
       */}
       <div className="max-h-[60vh] overflow-y-auto pr-1 -mr-1">
         {segs.map((seg, i) => {
-          const isActive = seg.runs.some((r) => active?.kind === "run" && active.node.agent_id === r.agent_id);
+          // 脉冲必须钉到当前那条 run 上（agent_id + at 双重身份）——
+          // 只比 agent_id 会让同一 agent 的历史节点也一起脉冲。
+          const isActive = seg.runs.some((r) => active?.kind === "run" && active.node.agent_id === r.agent_id && active.node.at === r.at);
           return (
             <div key={i} className="flex flex-col items-center">
               {i > 0 && <FlowArrow />}
@@ -310,7 +312,7 @@ function FlowCard({ items, active, agentName, nowMs, goalStatus, goalId }: {
                     const loop = seen.has(key);
                     seen.add(key);
                     return (
-                      <FlowNode key={run.agent_id + run.at} run={run} agentName={agentName} nowMs={nowMs} active={isActive && active?.kind === "run" && active.node.agent_id === run.agent_id} loop={loop} goalId={goalId} />
+                      <FlowNode key={run.agent_id + run.at} run={run} agentName={agentName} nowMs={nowMs} active={isActive && active?.kind === "run" && active.node.agent_id === run.agent_id && active.node.at === run.at} loop={loop} goalId={goalId} />
                     );
                   })}
                 </div>

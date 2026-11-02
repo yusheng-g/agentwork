@@ -45,6 +45,10 @@ export default function SettingsPage() {
                 {disconnect.isPending ? "断开中…" : "断开连接"}
               </Button>
             </div>
+            {/* 断开失败必须显示——静默等于「点了没反应」。 */}
+            {disconnect.isError && (
+              <p className="text-xs text-red-600">断开失败：{String(disconnect.error)}</p>
+            )}
           </div>
         ) : status === "reconnecting" ? (
           <div className="rounded-lg border border-amber-200 bg-amber-50 p-4 space-y-2">
@@ -81,6 +85,8 @@ export default function SettingsPage() {
             <Button onClick={() => connect.mutate()} disabled={connect.isPending}>
               {connect.isPending ? "重试中…" : "重新连接"}
             </Button>
+            {/* 重试失败同样要显示——此前 connect.isError 只在 idle 分支渲染。 */}
+            {connect.isError && <p className="text-sm text-red-500">{String(connect.error)}</p>}
           </div>
         ) : (
           <div className="rounded-lg border border-gray-200 p-4 space-y-3">

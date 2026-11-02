@@ -101,11 +101,20 @@ type TeamImportService struct {
 	agentSvc  *AgentService
 	skillSvc  *SkillService
 	squadSvc  *SquadService
+	// pushSkillUpdate re-pushes one skill's CURRENT archive to every agent
+	// that has it selected (the daemon's PushSkillUpdate). The import path
+	// upserts skills by name — rewritten files only reached machines on the
+	// next agent edit/connect, leaving stale copies in use. nil in tests.
+	pushSkillUpdate func(skillID string)
 }
 
 func NewTeamImportService(st *store.Store, bus *events.Bus) *TeamImportService {
 	return &TeamImportService{st: st, bus: bus}
 }
+
+// SetSkillUpdatePusher wires the daemon's PushSkillUpdate (detached +
+// best-effort at the call site). nil (tests) = no re-push.
+func (s *TeamImportService) SetSkillUpdatePusher(p func(skillID string)) { s.pushSkillUpdate = p }
 
 // SetDependencies wires the back-references (circular constructor order —
 // same pattern as DomainService.SetRunService). goalSvc + domainSvc are needed
@@ -478,6 +487,12 @@ func (s *TeamImportService) upsertSkills(ctx context.Context, ti *TeamImport, sk
 		out, err := s.skillSvc.UpsertByName(ctx, sk.Name, sk.Description, sk.Files)
 		if err != nil {
 			return nil, s.failImport(ctx, ti, fmt.Sprintf("upsert skill %q: %v", sk.Name, err))
+		}
+		// The skill's files were just (re)written — re-push it to every agent
+		// that has it selected so their machines' staging refreshes (nil in
+		// tests; a NEW skill has no selectors yet → the re-push is a no-op).
+		if s.pushSkillUpdate != nil {
+			s.pushSkillUpdate(out.ID)
 		}
 		skillIDs[sk.Name] = out.ID
 	}

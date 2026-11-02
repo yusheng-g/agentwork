@@ -1701,6 +1701,16 @@ func (d *Daemon) sweepDeliverWorktrees(ctx context.Context) {
 
 // ── run execution ──
 
+// fetchSourceComments fetches a source-ref goal's remote comments through the
+// kind-routed method — an issue's dialogue and a PR's dialogue live on
+// separate API surfaces (GitCode: /issues/:n/comments vs /pulls/:n/comments).
+func fetchSourceComments(ctx context.Context, client issue.Provider, kind issue.SourceRefKind, repo string, num int) ([]issue.Comment, error) {
+	if kind == issue.RefPull {
+		return client.ListPullComments(ctx, repo, num)
+	}
+	return client.ListComments(ctx, repo, num)
+}
+
 // runTask opens a transport, hands it to the protocol backend for one Prompt,
 // drains events into chat_message + WS, and finishes the run (which triggers
 // goal-layer reconciliation). Processor runs (no goal — run_kind=processor,
@@ -1791,41 +1801,54 @@ func (d *Daemon) runTask(ctx context.Context, q *service.ClaimedRow) {
 	_ = json.Unmarshal([]byte(rtEnvJSON), &rtEnv)
 	agentEnv, _ := d.loadAgentEnv(ctx, q.AgentID)
 
-	// M4-B: issue-sourced goals carry the issue identity so the agent can
-	// reply via `agentwork-cli issue comment` (the platform owns the token);
-	// the LIVE issue comments are fetched at run start and injected into the
-	// prompt — the issue stays the source of truth, nothing is stored.
-	var issueRepo, issueNumber string
+	// M4-B: source-ref goals (issue | pull request) carry the source identity
+	// so the agent can reply via `agentwork-cli issue comment` (the platform
+	// owns the token and routes by the source kind); the LIVE remote comments
+	// are fetched at run start and injected into the prompt — the source
+	// stays the source of truth, nothing is stored. A PR's dialogue lives on
+	// a dedicated API surface (GitCode: /pulls/:n/comments) — fetched through
+	// the kind-routed method, same as every other writeback path.
+	var srcRepo, srcNumber string
+	var srcKind issue.SourceRefKind
 	var issueComments []issue.Comment
 	if sourceRef != "" && gitCredentials != "" {
-		if provider, repo, num, ok := issue.ParseSourceRef(sourceRef); ok {
-			issueRepo, issueNumber = repo, strconv.Itoa(num)
+		if provider, repo, num, kind, ok := issue.ParseSourceRef(sourceRef); ok {
+			srcRepo, srcNumber, srcKind = repo, strconv.Itoa(num), kind
 			if client, err := issue.NewProvider(provider, gitCredentials); err == nil {
-				if comments, err := client.ListComments(ctx, repo, num); err == nil {
+				if comments, err := fetchSourceComments(ctx, client, kind, repo, num); err == nil {
 					issueComments = comments
-				} else if err != nil {
-					logging.Infof("daemon: issue comments for %s: %v", sourceRef, err)
+				} else {
+					logging.Infof("daemon: source comments for %s: %v", sourceRef, err)
 				}
 			}
 		}
 	}
 
 	var issueSection string
-	if issueRepo != "" {
-		// The run's goal tracks a PUBLIC issue on the git host. Anything
+	if srcRepo != "" {
+		// The run's goal tracks a PUBLIC issue/PR on the git host. Anything
 		// the agent posts there with `agentwork issue comment` is read by
 		// humans outside the platform — the contract rides EVERY run that
-		// can touch the issue, not the user-written persona (which is
+		// can touch the source, not the user-written persona (which is
 		// easy to leave unconfigured).
-		issueSection = "## Source issue (public)\n" +
-			"This goal tracks a PUBLIC issue (" + issueRepo + "#" + issueNumber + ") on the git host. " +
-			"Comments you post there with `agentwork issue comment` are read by people outside the platform — " +
-			"write professionally and completely (current status / plan / blockers / conclusions), " +
-			"never mention platform-internal ids or process details.\n"
+		if srcKind == issue.RefPull {
+			issueSection = "## Source pull request (public)\n" +
+				"This goal tracks a PUBLIC pull request (" + srcRepo + "!" + srcNumber + ") on the git host. " +
+				"The PR's source/target branches are in the goal description — fetch the source branch in the worktree to review the actual diff. " +
+				"Comments you post there with `agentwork issue comment` are read by people outside the platform — " +
+				"write professionally and completely (review findings / status / blockers / conclusions), " +
+				"never mention platform-internal ids or process details.\n"
+		} else {
+			issueSection = "## Source issue (public)\n" +
+				"This goal tracks a PUBLIC issue (" + srcRepo + "#" + srcNumber + ") on the git host. " +
+				"Comments you post there with `agentwork issue comment` are read by people outside the platform — " +
+				"write professionally and completely (current status / plan / blockers / conclusions), " +
+				"never mention platform-internal ids or process details.\n"
+		}
 	}
 	if len(issueComments) > 0 {
 		var ib strings.Builder
-		ib.WriteString("\n## Latest issue conversation (from the remote)\n")
+		ib.WriteString("\n## Latest source conversation (from the remote)\n")
 		for _, cm := range issueComments {
 			fmt.Fprintf(&ib, "- %s：%s\n", cm.User.Login, truncateIn(cm.Body, 300))
 		}
@@ -1853,9 +1876,12 @@ func (d *Daemon) runTask(ctx context.Context, q *service.ClaimedRow) {
 		for k, v := range agentEnv {
 			dispatchEnv[k] = v
 		}
-		if issueRepo != "" {
-			dispatchEnv["AGENTWORK_ISSUE_REPO"] = issueRepo
-			dispatchEnv["AGENTWORK_ISSUE_NUMBER"] = issueNumber
+		if srcRepo != "" {
+			dispatchEnv["AGENTWORK_ISSUE_REPO"] = srcRepo
+			dispatchEnv["AGENTWORK_ISSUE_NUMBER"] = srcNumber
+			if srcKind == issue.RefPull {
+				dispatchEnv["AGENTWORK_SOURCE_KIND"] = "pull"
+			}
 		}
 		machinePrompt := d.assemblePrompt(ctx, q, promptInputs{
 			agentName: agentName, systemPrompt: systemPrompt, runRole: runRole,

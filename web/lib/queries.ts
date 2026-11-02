@@ -657,6 +657,7 @@ export function useGoalEvents() {
       qc.invalidateQueries({ queryKey: qk.goal(id) });
       qc.invalidateQueries({ queryKey: qk.goalRuns(id) });
       qc.invalidateQueries({ queryKey: qk.goalChanges(id) });
+      qc.invalidateQueries({ queryKey: qk.goalTimeline(id) });
     }
   });
   // The review window's PHASE derives from the goal's review runs (决策 6-19
@@ -670,6 +671,9 @@ export function useGoalEvents() {
       qc.invalidateQueries({ queryKey: qk.goal(id) });
       qc.invalidateQueries({ queryKey: qk.goalRuns(id) });
       qc.invalidateQueries({ queryKey: qk.goals });
+      // timeline 也必须刷新——否则 run 取消后执行 flow 卡/状态条仍从
+      // 旧数据里读到 run_status:"running"，脉冲钉在已取消的 run 上。
+      qc.invalidateQueries({ queryKey: qk.goalTimeline(id) });
     }
   };
   useWSEvent("run:claimed", invalidateRuns);

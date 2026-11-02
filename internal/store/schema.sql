@@ -48,6 +48,8 @@ CREATE TABLE IF NOT EXISTS domain (
     issue_assignee         TEXT NOT NULL DEFAULT '',       -- M4-B: agent|squad id that handles this repo's issues ('' = don't auto-create)
     issue_assignee_type    TEXT NOT NULL DEFAULT 'agent',  -- M4-B: agent | squad (what issue_assignee points at)
     issue_provider         TEXT NOT NULL DEFAULT 'github', -- M4-B: github | gitcode (issue API + webhook signature shape)
+    pull_assignee          TEXT NOT NULL DEFAULT '',       -- M4-B PR pull: agent|squad id that handles this repo's pull requests ('' = don't pull PRs)
+    pull_assignee_type     TEXT NOT NULL DEFAULT 'agent',  -- M4-B PR pull: agent | squad (what pull_assignee points at)
     created_at             TEXT NOT NULL
 );
 

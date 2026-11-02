@@ -133,3 +133,94 @@ func (c *GitCodeClient) CloseIssue(ctx context.Context, repo string, number int)
 func (c *GitCodeClient) CommitURL(repo, sha string) string {
 	return "https://gitcode.com/" + repo + "/commit/" + sha
 }
+
+// ── Pull-request surface (PR pull) ──
+
+// flexInt decodes a JSON number OR a JSON string holding digits (GitCode's
+// wire shapes have varied across revisions: the issue number is a STRING,
+// the documented PR number an INTEGER — accept both instead of betting on
+// one).
+type flexInt int
+
+func (f *flexInt) UnmarshalJSON(b []byte) error {
+	s := strings.Trim(strings.TrimSpace(string(b)), `"`)
+	if s == "" || s == "null" {
+		*f = 0
+		return nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return fmt.Errorf("flexInt: %q: %w", s, err)
+	}
+	*f = flexInt(n)
+	return nil
+}
+
+// gitCodePull is GitCode's PR wire shape (minimal): head carries the source
+// branch + SHA, base the target branch. A draft PR (draft=true) is skipped
+// by the poller — a draft is not a work request yet.
+type gitCodePull struct {
+	Number  flexInt `json:"number"`
+	Title   string  `json:"title"`
+	Body    string  `json:"body"`
+	HTMLURL string  `json:"html_url"`
+	Draft   bool    `json:"draft"`
+	User    struct {
+		Login string `json:"login"`
+	} `json:"user"`
+	Head struct {
+		Ref string `json:"ref"`
+		SHA string `json:"sha"`
+	} `json:"head"`
+	Base struct {
+		Ref string `json:"ref"`
+	} `json:"base"`
+}
+
+// ListOpenPulls returns the repo's open PRs. GitCode keeps pull requests in
+// a separate /pulls collection (issues and PRs are separate sequences — PRs
+// never appear in the issues list). Draft PRs are excluded: a draft is not
+// ready for review.
+func (c *GitCodeClient) ListOpenPulls(ctx context.Context, repo string) ([]Pull, error) {
+	var raw []gitCodePull
+	if err := c.do(ctx, http.MethodGet, "/repos/"+repo+"/pulls?state=open&per_page=100", nil, &raw); err != nil {
+		return nil, err
+	}
+	out := []Pull{}
+	for _, pr := range raw {
+		if pr.Draft {
+			continue
+		}
+		out = append(out, Pull{
+			Number: int(pr.Number), Title: pr.Title, Body: pr.Body, HTMLURL: pr.HTMLURL,
+			Author: pr.User.Login, SourceBranch: pr.Head.Ref, TargetBranch: pr.Base.Ref,
+			HeadSHA: pr.Head.SHA,
+		})
+	}
+	return out, nil
+}
+
+// ListPullComments returns the PR's comments. GitCode serves PR dialogue
+// through a DEDICATED /pulls/:n/comments endpoint — the issues endpoint
+// does NOT cover PR comments (the provider difference this surface exists
+// for).
+func (c *GitCodeClient) ListPullComments(ctx context.Context, repo string, number int) ([]Comment, error) {
+	var raw []gitCodeComment
+	if err := c.do(ctx, http.MethodGet, fmt.Sprintf("/repos/%s/pulls/%d/comments?per_page=100", repo, number), nil, &raw); err != nil {
+		return nil, err
+	}
+	out := []Comment{}
+	for _, cm := range raw {
+		id, _ := strconv.Atoi(cm.ID)
+		out = append(out, Comment{ID: id, Body: cm.Body, User: struct {
+			Login string `json:"login"`
+		}{Login: cm.User.Login}})
+	}
+	return out, nil
+}
+
+// CreatePullComment posts a comment on the PR (the PR comments endpoint).
+func (c *GitCodeClient) CreatePullComment(ctx context.Context, repo string, number int, body string) error {
+	return c.do(ctx, http.MethodPost, fmt.Sprintf("/repos/%s/pulls/%d/comments", repo, number),
+		url.Values{"body": {body}}, nil)
+}

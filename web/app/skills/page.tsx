@@ -34,7 +34,7 @@ export default function SkillsPage() {
                 <Button
                   variant="danger"
                   className="!px-2.5 !py-1 text-xs"
-                  disabled={del.isPending}
+                  disabled={del.isPending && del.variables === sk.id}
                   onClick={() => {
                     if (confirm(`删除 skill「${sk.name}」？`)) del.mutate(sk.id);
                   }}
@@ -42,7 +42,10 @@ export default function SkillsPage() {
                   删除
                 </Button>
               </div>
-              {del.isError && <p className="text-xs text-red-500 mt-1">{String(del.error)}</p>}
+              {/* 错误只挂到对应行——全局 isPending/isError 会扩散到所有行。 */}
+              {del.isError && del.variables === sk.id && (
+                <p className="text-xs text-red-500 mt-1">{String(del.error)}</p>
+              )}
             </div>
           ))}
         </div>
